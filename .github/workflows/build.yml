@@ -1,1 +1,29 @@
-dd
+name: Build dylib
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+
+      - name: Build
+        run: |
+          make clean
+          make
+          ls -la .theos/obj/
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: AstralCheat.dylib
+          path: .theos/obj/AstralCheat.dylib
+          if-no-files-found: error
