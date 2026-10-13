@@ -1,3 +1,6 @@
+[@JBtoAI] целиком в `.github/workflows/build.yml`:
+
+```yaml
 name: Build dylib
 
 on:
@@ -8,60 +11,104 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
-    timeout-minutes: 30
+    name: build
+    runs-on: macos-14
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show tree (debug)
+      - name: Detect project root
+        id: root
         run: |
-          echo "=== repo root ==="
+          set -e
+          echo "== pwd =="
+          pwd
+          echo "== ls =="
           ls -la
-          echo "=== src ==="
-          ls -la src 2>/dev/null || echo "NO src/"
-          echo "=== include ==="
-          ls -la include 2>/dev/null || echo "NO include/"
-          echo "=== Makefile ==="
-          cat Makefile 2>/dev/null || echo "NO Makefile"
+          if [ -f Makefile ]; then
+            echo "root=." >> "$GITHUB_OUTPUT"
+            echo "Project at repo root"
+          elif [ -f astral_full/Makefile ]; then
+            echo "root=astral_full" >> "$GITHUB_OUTPUT"
+            echo "Project in astral_full/"
+          else
+            echo "Makefile not found in . or astral_full/"
+            find . -name Makefile -o -name "*.mm" 2>/dev/null | head -40
+            exit 1
+          fi
 
-      - name: Setup Theos
-        uses: Randomblock1/theos-action@v1
+      - name: Show sources
+        working-directory: ${{ steps.root.outputs.root }}
+        run: |
+          echo "== tree =="
+          ls -la
+          ls -la src include 2>/dev/null || true
+          echo "== Makefile =="
+          cat Makefile
+          echo "== file counts =="
+          wc -l src/*.mm include/*.h
+
+      - name: Install Theos
+        run: |
+          set -e
+          echo "== clone Theos =="
+          export THEOS="$HOME/theos"
+          if [ ! -d "$THEOS" ]; then
+            git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          fi
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "== theos ok =="
+          ls "$THEOS"
+          echo "== xcode =="
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
 
       - name: Build
-        id: build
+        working-directory: ${{ steps.root.outputs.root }}
         run: |
-          set -o pipefail
+          set -euo pipefail
+          export THEOS="${THEOS:-$HOME/theos}"
+          echo "== env =="
           echo "THEOS=$THEOS"
-          echo "SDK:"
-          ls "$THEOS/sdks" 2>/dev/null || true
-          make clean 2>&1 | tee make-clean.log
-          make 2>&1 | tee make-build.log
-          echo "=== search dylib ==="
-          find .theos -name "*.dylib" -type f 2>/dev/null || true
-          find . -name "AstralCheat.dylib" -type f 2>/dev/null || true
+          echo "== clean =="
+          make clean 2>&1 | tee make-clean.log || true
+          echo "== make =="
+          make TARGET=iphone:clang:latest:14.0 ARCHS=arm64 2>&1 | tee make-build.log
+          echo "== artifacts =="
+          find .theos -type f \( -name "*.dylib" -o -name "*.o" \) 2>/dev/null | head -50
+          DYLIB=$(find .theos -name "AstralCheat.dylib" -type f | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: AstralCheat.dylib not found"
+            exit 1
+          fi
+          echo "DYLIB=$DYLIB"
+          ls -lh "$DYLIB"
+          cp "$DYLIB" "$GITHUB_WORKSPACE/AstralCheat.dylib"
 
-      - name: Dump logs on failure
+      - name: On failure — full logs
         if: failure()
+        working-directory: ${{ steps.root.outputs.root }}
         run: |
-          echo "========== make-clean.log =========="
-          cat make-clean.log 2>/dev/null || echo "(empty)"
-          echo "========== make-build.log =========="
-          cat make-build.log 2>/dev/null || echo "(empty)"
-          echo "========== .theos =========="
+          echo "########## make-clean.log ##########"
+          cat make-clean.log 2>/dev/null || echo "(none)"
+          echo "########## make-build.log ##########"
+          cat make-build.log 2>/dev/null || echo "(none)"
+          echo "########## .theos ##########"
           ls -laR .theos 2>/dev/null || echo "(no .theos)"
-          echo "========== env =========="
-          env | sort
+          echo "########## clang ##########"
+          xcrun -sdk iphoneos clang++ --version || true
 
-      - name: Upload build logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
-            make-clean.log
-            make-build.log
+            **/make-clean.log
+            **/make-build.log
+            AstralCheat.dylib
           if-no-files-found: ignore
 
       - name: Upload dylib
@@ -69,7 +116,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AstralCheat.dylib
-          path: |
-            .theos/obj/AstralCheat.dylib
-            .theos/obj/**/AstralCheat.dylib
+          path: AstralCheat.dylib
           if-no-files-found: error
+```
