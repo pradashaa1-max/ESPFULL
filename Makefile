@@ -10,7 +10,7 @@ DEBUG  = 0
 LIBRARY_NAME = AstralCheat
 
 AstralCheat_FILES = src/Menu.mm src/Features.mm
-AstralCheat_CFLAGS = -fobjc-arc -O2 -Iinclude -Wno-unused-function
+AstralCheat_CFLAGS = -fobjc-arc -O2 -Iinclude -Wno-unused-function -Wno-unused-variable -fexceptions
 AstralCheat_FRAMEWORKS = UIKit Foundation QuartzCore CoreGraphics
 AstralCheat_INSTALL_PATH = /usr/lib
 
