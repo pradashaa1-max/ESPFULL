@@ -355,16 +355,16 @@ static void refresh_players(void* camTr) {
 
         // ── Box ──
         if (box) {
-            CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.1 green:1 blue:0.3 alpha:0.95].CGColor);
+            CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.15 green:0.55 blue:1.0 alpha:0.95].CGColor);
             CGContextSetLineWidth(ctx, 1.6);
             CGContextStrokeRect(ctx, CGRectMake(bx, by, w, h));
         }
 
         // ── Skeleton ──
         if (skel) {
-            CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.2 green:0.85 blue:1 alpha:0.9].CGColor);
+            CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.25 green:0.65 blue:1.0 alpha:0.95].CGColor);
             CGContextSetLineWidth(ctx, 1.3);
-            CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:0.2 green:0.85 blue:1 alpha:1].CGColor);
+            CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:0.3 green:0.7 blue:1.0 alpha:1].CGColor);
             CGPoint pts[14];
             bool ok[14] = {};
             for (int i = 0; i < 14; i++)
