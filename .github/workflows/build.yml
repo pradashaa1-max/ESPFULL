@@ -9,21 +9,67 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show tree (debug)
+        run: |
+          echo "=== repo root ==="
+          ls -la
+          echo "=== src ==="
+          ls -la src 2>/dev/null || echo "NO src/"
+          echo "=== include ==="
+          ls -la include 2>/dev/null || echo "NO include/"
+          echo "=== Makefile ==="
+          cat Makefile 2>/dev/null || echo "NO Makefile"
 
       - name: Setup Theos
         uses: Randomblock1/theos-action@v1
 
       - name: Build
+        id: build
         run: |
-          make clean
-          make
-          ls -la .theos/obj/
+          set -o pipefail
+          echo "THEOS=$THEOS"
+          echo "SDK:"
+          ls "$THEOS/sdks" 2>/dev/null || true
+          make clean 2>&1 | tee make-clean.log
+          make 2>&1 | tee make-build.log
+          echo "=== search dylib ==="
+          find .theos -name "*.dylib" -type f 2>/dev/null || true
+          find . -name "AstralCheat.dylib" -type f 2>/dev/null || true
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "========== make-clean.log =========="
+          cat make-clean.log 2>/dev/null || echo "(empty)"
+          echo "========== make-build.log =========="
+          cat make-build.log 2>/dev/null || echo "(empty)"
+          echo "========== .theos =========="
+          ls -laR .theos 2>/dev/null || echo "(no .theos)"
+          echo "========== env =========="
+          env | sort
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            make-clean.log
+            make-build.log
+          if-no-files-found: ignore
 
       - name: Upload dylib
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AstralCheat.dylib
-          path: .theos/obj/AstralCheat.dylib
+          path: |
+            .theos/obj/AstralCheat.dylib
+            .theos/obj/**/AstralCheat.dylib
           if-no-files-found: error
