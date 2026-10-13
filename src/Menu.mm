@@ -5,6 +5,8 @@
 #include "State.h"
 #include <cmath>
 
+void Astral_RebuildMenu(void);
+
 extern void Astral_FeaturesTick();
 extern void Astral_EnsureFOVOverlay(UIWindow* win);
 
@@ -428,14 +430,6 @@ static void buildPanel(UIView* host) {
 
     g_content = [[UIView alloc] initWithFrame:CGRectMake(0,0,320,300)];
     [g_scroll addSubview:g_content];
-
-    // Drag
-    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:nil];
-    [pan addTarget:[NSBlockOperation blockOperationWithBlock:^{}] action:nil];
-    // simple pan via action
-    __weak UIView* weakPanel = g_panel;
-    [g_panel addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:nil action:nil]];
-    // use block-based via UIAction not available for pan — skip, fixed position ok
 
     [host addSubview:g_panel];
     rebuildContent();

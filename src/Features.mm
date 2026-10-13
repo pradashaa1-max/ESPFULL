@@ -118,6 +118,60 @@ static int get_team(void* pc) {
     return (int)*((uint8_t*)pc + Offsets::PC_team);
 }
 
+// Il2CppString: length @ +0x10 (int32), chars UTF-16 @ +0x14
+static void read_il2cpp_string(void* strObj, char* out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    out[0] = 0;
+    if (!strObj) return;
+    int32_t len = *(int32_t*)((char*)strObj + 0x10);
+    if (len <= 0 || len > 64) return;
+    const uint16_t* chars = (const uint16_t*)((char*)strObj + 0x14);
+    size_t n = 0;
+    for (int32_t i = 0; i < len && n + 1 < outLen; i++) {
+        uint16_t c = chars[i];
+        if (c < 128) out[n++] = (char)c;
+        else out[n++] = '?';
+    }
+    out[n] = 0;
+}
+
+static void read_nick(void* pc, char* out, size_t outLen) {
+    out[0] = 0;
+    if (!pc) { snprintf(out, outLen, "Enemy"); return; }
+    void* pp = *(void**)((char*)pc + Offsets::PC_photonPlayer);
+    if (!pp) { snprintf(out, outLen, "Enemy"); return; }
+    void* nameStr = *(void**)((char*)pp + Offsets::PP_nameField);
+    if (nameStr) {
+        read_il2cpp_string(nameStr, out, outLen);
+        if (out[0]) return;
+    }
+    if (unity_base()) {
+        using get_nick_t = void* (*)(void*);
+        void* s = RVA<get_nick_t>(Offsets::PhotonPlayer_get_NickName)(pp);
+        if (s) {
+            read_il2cpp_string(s, out, outLen);
+            if (out[0]) return;
+        }
+    }
+    snprintf(out, outLen, "Enemy");
+}
+
+static void read_weapon(void* pc, char* out, size_t outLen, int* ammo) {
+    out[0] = 0;
+    if (ammo) *ammo = -1;
+    if (!pc) return;
+    void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
+    if (!wry) return;
+    void* wctrl = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
+    if (!wctrl) return;
+    void* wname = *(void**)((char*)wctrl + Offsets::WCtrl_nameStr);
+    if (wname) read_il2cpp_string(wname, out, outLen);
+    if (ammo) {
+        int a = *(int*)((char*)wctrl + Offsets::WCtrl_intA);
+        if (a >= 0 && a < 500) *ammo = a;
+    }
+}
+
 static std::vector<void*> find_players_raw() {
     std::vector<void*> out;
     auto& api = IL2CPP();
@@ -173,23 +227,32 @@ static void refresh_players(void* camTr) {
         void* tr = component_transform(pc);
         if (!tr) continue;
         PSnap s{};
-        s.obj  = pc;
-        s.tr   = tr;
-        s.pos  = get_pos(tr);
-        s.team = get_team(pc);
-        s.local= (pc == local);
-        s.hp   = 100.f;
-        s.dead = false;
-        s.ammo = -1;
-        snprintf(s.name, sizeof(s.name), "Enemy");
-        snprintf(s.weapon, sizeof(s.weapon), "");
-        // best-effort HP from hit controller
+        s.obj   = pc;
+        s.tr    = tr;
+        s.pos   = get_pos(tr);
+        s.team  = get_team(pc);
+        s.local = (pc == local);
+        s.hp    = 100.f;
+        s.dead  = false;
+        s.ammo  = -1;
+        read_nick(pc, s.name, sizeof(s.name));
+        read_weapon(pc, s.weapon, sizeof(s.weapon), &s.ammo);
+
         void* hit = *(void**)((char*)pc + Offsets::PC_hitController);
         if (hit) {
-            float h = *(float*)((char*)hit + 0x18);
-            if (h >= 0.f && h <= 200.f) s.hp = h;
-            s.dead = s.hp <= 0.01f;
+            for (size_t off = 0x10; off <= 0xE0; off += 4) {
+                float h = *(float*)((char*)hit + off);
+                if (h > 0.5f && h <= 100.5f) { s.hp = h; break; }
+            }
         }
+        void* net = *(void**)((char*)pc + 0x98);
+        if (net && s.hp >= 99.f) {
+            for (size_t off = 0x10; off <= 0x80; off += 4) {
+                float h = *(float*)((char*)net + off);
+                if (h > 0.5f && h < 100.5f) { s.hp = h; break; }
+            }
+        }
+        s.dead = s.hp <= 0.5f;
         tmp.push_back(s);
     }
     std::lock_guard<std::mutex> lk(g_plist_mtx);
@@ -390,6 +453,14 @@ static void refresh_players(void* camTr) {
                     NSForegroundColorAttributeName: [UIColor colorWithRed:1 green:0.3 blue:0.2 alpha:1]
                 };
                 [am drawAtPoint:CGPointMake(wx+38, wy+2) withAttributes:aa];
+            }
+            if (p.weapon[0]) {
+                NSString* wn = [NSString stringWithUTF8String:p.weapon];
+                NSDictionary* wa = @{
+                    NSFontAttributeName: [UIFont systemFontOfSize:9 weight:UIFontWeightMedium],
+                    NSForegroundColorAttributeName: [UIColor colorWithRed:1 green:0.4 blue:0.3 alpha:0.95]
+                };
+                [wn drawAtPoint:CGPointMake(wx, wy+18) withAttributes:wa];
             }
         }
 
