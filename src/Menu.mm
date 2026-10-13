@@ -58,7 +58,7 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     UIView* hit = [super hitTest:point withEvent:event];
     if (hit == self || hit == self.rootViewController.view) return nil;
     NSString* cls = NSStringFromClass(hit.class);
-    if ([cls containsString:@"TextField"] || hit.tag == 0xSEC1) {
+    if ([cls containsString:@"TextField"] || hit.tag == 99001) {
         for (UIView* s in hit.subviews) {
             CGPoint p = [hit convertPoint:point toView:s];
             if (!s.hidden && s.userInteractionEnabled && CGRectContainsPoint(s.bounds, p)) {
@@ -123,11 +123,11 @@ static void applyHideRec(UIView* root) {
         }
         UIView* container = g_secureField.subviews.firstObject ?: g_secureField;
         container.userInteractionEnabled = YES;
-        container.tag = 0xSEC1;
-        UIView* host = [container viewWithTag:0xSEC2];
+        container.tag = 99001;
+        UIView* host = [container viewWithTag:99002];
         if (!host) {
             host = [[UIView alloc] initWithFrame:root.bounds];
-            host.tag = 0xSEC2;
+            host.tag = 99002;
             host.backgroundColor = UIColor.clearColor;
             host.userInteractionEnabled = YES;
             host.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
@@ -413,7 +413,7 @@ static void buildPanel(UIView* host) {
         b.layer.cornerRadius = 8;
         b.tag = i;
         [b addAction:[UIAction actionWithHandler:^(__kindof UIAction* a) {
-            g_section = (int)a.sender.tag;
+            g_section = (int)((UIView *)a.sender).tag;
             for (UIButton* bb in g_tabBtns)
                 bb.backgroundColor = (bb.tag==g_section) ? Accent() : C(0.1,0.12,0.2,1);
             rebuildContent();
