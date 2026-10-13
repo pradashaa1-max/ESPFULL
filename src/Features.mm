@@ -273,7 +273,9 @@ static void refresh_players(void* camTr) {
     if (!ctx) return;
 
     CGSize scr = self.bounds.size;
-    if (scr.width < 10) return;
+    if (scr.width < 10 || scr.height < 10) return;
+    // normalize to landscape if needed (w should be longer side for FOV math)
+    // drawing still uses actual bounds center
 
     void* cam = main_camera();
     if (!cam) return;
@@ -604,6 +606,12 @@ void Astral_FeaturesTick() {
     }
 
     CGSize scr = UIScreen.mainScreen.bounds.size;
+    if (scr.height > scr.width) {
+        // force landscape dimensions for aim FOV math
+        scr = CGSizeMake(scr.height, scr.width);
+    }
+    if (g_espView && g_espView.bounds.size.width > 10)
+        scr = g_espView.bounds.size;
     run_aim(cam, camTr, scr);
 
     // redraw ESP + keep frame centered on full screen

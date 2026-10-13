@@ -115,8 +115,9 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 
 @interface ACVC : UIViewController @end
 @implementation ACVC
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 - (BOOL)shouldAutorotate { return YES; }
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation { return UIInterfaceOrientationLandscapeRight; }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
@@ -143,53 +144,57 @@ static void applyHideRec(UIView* root) {
     if (!root) return;
     BOOL on = g_hideRec.load();
 
-    auto placeUI = ^(UIView* host) {
-        Astral_SecureRoot = on ? host : nil;
-        if (g_panel && g_panel.superview != host) {
-            [g_panel removeFromSuperview];
-            [host addSubview:g_panel];
-        }
-        if (g_fab && g_fab.superview != host) {
-            [g_fab removeFromSuperview];
-            [host addSubview:g_fab];
-        }
-        Astral_EnsureFOVOverlay(g_overlay);
-    };
+    // CRITICAL: panel + FAB always live on the normal root so game touches work.
+    // Only ESP goes into the secure layer (hide from screenshots/recording).
+    if (g_panel && g_panel.superview != root) {
+        [g_panel removeFromSuperview];
+        [root addSubview:g_panel];
+    }
+    if (g_fab && g_fab.superview != root) {
+        [g_fab removeFromSuperview];
+        [root addSubview:g_fab];
+    }
 
     if (on) {
         if (!g_secureField) {
             g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
             g_secureField.secureTextEntry = YES;
-            g_secureField.userInteractionEnabled = YES;
+            g_secureField.userInteractionEnabled = NO; // never steal touches
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
-            [root addSubview:g_secureField];
+            [root insertSubview:g_secureField atIndex:0];
+        } else {
+            g_secureField.frame = root.bounds;
+            if (g_secureField.superview != root)
+                [root insertSubview:g_secureField atIndex:0];
         }
         UIView* container = g_secureField.subviews.firstObject ?: g_secureField;
-        container.userInteractionEnabled = YES;
+        container.userInteractionEnabled = NO;
         container.tag = 99001;
         UIView* host = [container viewWithTag:99002];
         if (!host) {
             host = [[UIView alloc] initWithFrame:root.bounds];
             host.tag = 99002;
             host.backgroundColor = UIColor.clearColor;
-            host.userInteractionEnabled = YES;
+            host.userInteractionEnabled = NO;
             host.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
             [container addSubview:host];
+        } else {
+            host.frame = root.bounds;
+            host.userInteractionEnabled = NO;
         }
-        placeUI(host);
-        [root bringSubviewToFront:g_secureField];
+        Astral_SecureRoot = host; // ESP only
     } else {
-        placeUI(root);
+        Astral_SecureRoot = nil;
         if (g_secureField) {
             [g_secureField removeFromSuperview];
             g_secureField = nil;
         }
-        Astral_SecureRoot = nil;
     }
+    Astral_EnsureFOVOverlay(g_overlay);
 }
 
-// ─── Row builders ────────────────────────────────────────────────────────────
+
 static UIView* makeSwitch(NSString* title, NSString* sub, bool on, void(^cb)(bool)) {
     UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,54)];
     row.backgroundColor = C(0.06,0.08,0.14,0.95);
@@ -541,19 +546,30 @@ static void buildFab(UIView* host) {
         return;
     }
 
+    // Prefer landscape size (w > h)
+    CGRect kb = key.bounds;
+    if (kb.size.height > kb.size.width) {
+        kb = CGRectMake(0, 0, kb.size.height, kb.size.width);
+    }
+
     if (!g_overlay) {
-        g_overlay = [[ACW alloc] initWithFrame:key.bounds];
+        g_overlay = [[ACW alloc] initWithFrame:kb];
         g_overlay.windowLevel = UIWindowLevelAlert + 100;
         g_overlay.backgroundColor = UIColor.clearColor;
+        g_overlay.userInteractionEnabled = YES;
         g_overlay.rootViewController = [ACVC new];
         g_overlay.hidden = NO;
-        // NOT makeKey — game keeps input
+        // never makeKey — game keeps input focus
+    } else {
+        g_overlay.frame = key.bounds;
     }
 
     UIView* root = g_overlay.rootViewController.view;
+    root.frame = g_overlay.bounds;
+    root.userInteractionEnabled = YES;
     buildPanel(root);
     buildFab(root);
-    applyHideRec(root);   // hide-rec ON from start
+    applyHideRec(root);
     Astral_EnsureFOVOverlay(g_overlay);
 
     if (!g_tick) {
@@ -563,6 +579,24 @@ static void buildFab(UIView* host) {
     }
 }
 + (void)onTick {
+    // Keep overlay sized to the real key window (rotation / landscape)
+    UIWindow* key = nil;
+    for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
+            if (w.isKeyWindow && w != g_overlay) { key = w; break; }
+        }
+        if (key) break;
+    }
+    if (key && g_overlay) {
+        CGRect b = key.bounds;
+        if (!CGRectEqualToRect(g_overlay.frame, b)) {
+            g_overlay.frame = b;
+            g_overlay.rootViewController.view.frame = g_overlay.bounds;
+        }
+    }
+    if (g_overlay)
+        Astral_EnsureFOVOverlay(g_overlay);
     Astral_FeaturesTick();
 }
 @end
