@@ -27,24 +27,38 @@ constexpr uint64_t GameObject_get_transform    = 0x331A880;
 // PlayerController fields (TypeDefIndex 2782)
 constexpr size_t PC_mainCameraHolder  = 0x20;
 constexpr size_t PC_fpsCameraHolder   = 0x28;
-constexpr size_t PC_team              = 0x59;   // Team enum byte
-constexpr size_t PC_aimController     = 0x60;   // AimController*
-constexpr size_t PC_weaponry          = 0x68;   // WeaponryController*
+constexpr size_t PC_team              = 0x59;
+constexpr size_t PC_aimController     = 0x60;
+constexpr size_t PC_weaponry          = 0x68;
 constexpr size_t PC_movement          = 0x78;
-constexpr size_t PC_hitController     = 0x88;   // PlayerHitController*
+constexpr size_t PC_hitController     = 0x88;
 constexpr size_t PC_characterCtrl     = 0xF0;
 constexpr size_t PC_photonView        = 0x120;
 constexpr size_t PC_photonPlayer      = 0x130;
 
-// AimController fields (TypeDefIndex 2930)
+// PhotonPlayer (TypeDefIndex 1616)
+constexpr size_t PP_actorID           = 0x10;
+constexpr size_t PP_nameField         = 0x18;   // string → NickName
+constexpr size_t PP_isLocal           = 0x20;
+constexpr uint64_t PhotonPlayer_get_NickName = 0x14B19F8;
+
+// AimController (2930)
 constexpr size_t AC_sensX             = 0x50;
 constexpr size_t AC_sensY             = 0x54;
-constexpr size_t AC_fpsCamTr          = 0x70;   // Transform FPSCamera
-constexpr size_t AC_camTransform      = 0x80;   // Transform camTransform
+constexpr size_t AC_fpsCamTr          = 0x70;
+constexpr size_t AC_camTransform      = 0x80;
 
-// PlayerManager fields (TypeDefIndex 2794)
-constexpr size_t PM_dict              = 0x20;   // Dictionary<int,PlayerController>
-constexpr size_t PM_hashset           = 0x28;   // HashSet<PlayerController>
+// WeaponryController (2815)
+constexpr size_t Wry_weaponCtrl       = 0x98;   // WeaponController*
+
+// WeaponController (4100)
+constexpr size_t WCtrl_nameStr        = 0x58;   // string
+constexpr size_t WCtrl_intA           = 0x60;   // int
+constexpr size_t WCtrl_params         = 0x68;
+
+// PlayerManager (2794)
+constexpr size_t PM_dict              = 0x20;
+constexpr size_t PM_hashset           = 0x28;
 constexpr size_t PM_localA            = 0x68;
 constexpr size_t PM_localB            = 0x70;
 
