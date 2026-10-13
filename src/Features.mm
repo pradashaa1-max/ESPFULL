@@ -6,6 +6,9 @@
 #include "State.h"
 #include "Il2Cpp.h"
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <cstdint>
 #include <vector>
 #include <mutex>
 #include <algorithm>

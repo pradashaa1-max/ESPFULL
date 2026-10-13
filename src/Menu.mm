@@ -4,6 +4,8 @@
 #import <objc/runtime.h>
 #include "State.h"
 #include <cmath>
+#include <atomic>
+#include <cstdint>
 
 void Astral_RebuildMenu(void);
 
