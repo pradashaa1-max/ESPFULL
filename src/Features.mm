@@ -280,14 +280,17 @@ static void refresh_players(void* camTr) {
     void* camTr = component_transform(cam);
     Vec3 camPos = camTr ? get_pos(camTr) : Vec3{};
 
-    // FOV circle
+    // FOV circle — exact center of this view (must match crosshair)
     if (g_fovDraw.load()) {
-        CGFloat shortSide = MIN(scr.width, scr.height);
+        CGFloat w = self.bounds.size.width;
+        CGFloat h = self.bounds.size.height;
+        if (w < 10 || h < 10) { w = scr.width; h = scr.height; }
+        CGFloat shortSide = MIN(w, h);
         CGFloat r = shortSide * (0.03f + (g_fov.load() / 30.f) * 0.22f);
-        CGPoint c = CGPointMake(scr.width*0.5, scr.height*0.5);
-        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.2 green:0.7 blue:1 alpha:0.7].CGColor);
-        CGContextSetLineWidth(ctx, 1.4);
-        CGContextStrokeEllipseInRect(ctx, CGRectMake(c.x-r, c.y-r, r*2, r*2));
+        CGPoint c = CGPointMake(w * 0.5, h * 0.5);
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.25 green:0.65 blue:1.0 alpha:0.85].CGColor);
+        CGContextSetLineWidth(ctx, 1.6);
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(c.x - r, c.y - r, r * 2, r * 2));
     }
 
     bool box  = g_espBox.load();
@@ -486,25 +489,32 @@ static ESPView* g_espView = nil;
 void Astral_EnsureFOVOverlay(UIWindow* win) {
     if (!win) return;
     UIView* root = Astral_SecureRoot ?: (win.rootViewController.view ?: win);
+    // Always match the live window bounds (handles landscape / rotation)
     CGRect b = win.bounds;
-    if (b.size.width < 10) b = UIScreen.mainScreen.bounds;
+    if (b.size.width < 10 || b.size.height < 10) {
+        b = [UIScreen mainScreen].bounds;
+    }
+    // If root is smaller/different, prefer root bounds in its coordinate space
+    if (root && root.bounds.size.width > 10) {
+        b = root.bounds;
+    }
 
     if (!g_espView) {
         g_espView = [[ESPView alloc] initWithFrame:b];
-        g_espView.userInteractionEnabled = NO;
+        g_espView.userInteractionEnabled = NO; // never block game touches
         g_espView.backgroundColor = UIColor.clearColor;
+        g_espView.opaque = NO;
         g_espView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         g_espView.contentMode = UIViewContentModeRedraw;
-        [root addSubview:g_espView];
+        [root insertSubview:g_espView atIndex:0];
     } else {
-        g_espView.frame = b;
+        if (!CGRectEqualToRect(g_espView.frame, b))
+            g_espView.frame = b;
         if (g_espView.superview != root) {
             [g_espView removeFromSuperview];
-            [root addSubview:g_espView];
+            [root insertSubview:g_espView atIndex:0];
         }
     }
-    // keep on top of game, under menu panel
-    [root insertSubview:g_espView atIndex:0];
 }
 
 // ─── Aimbot / Silent ─────────────────────────────────────────────────────────
@@ -596,13 +606,17 @@ void Astral_FeaturesTick() {
     CGSize scr = UIScreen.mainScreen.bounds.size;
     run_aim(cam, camTr, scr);
 
-    // redraw ESP
+    // redraw ESP + keep frame centered on full screen
     if (g_espView) {
-        // reparent into secure root if hide-rec toggled
-        UIView* want = Astral_SecureRoot ?: g_espView.superview;
-        if (Astral_SecureRoot && g_espView.superview != Astral_SecureRoot) {
-            [g_espView removeFromSuperview];
-            [Astral_SecureRoot insertSubview:g_espView atIndex:0];
+        UIView* root = Astral_SecureRoot ?: g_espView.superview;
+        if (root) {
+            CGRect b = root.bounds;
+            if (b.size.width > 10 && !CGRectEqualToRect(g_espView.frame, b))
+                g_espView.frame = b;
+            if (g_espView.superview != root) {
+                [g_espView removeFromSuperview];
+                [root insertSubview:g_espView atIndex:0];
+            }
         }
         [g_espView setNeedsDisplay];
     }

@@ -52,23 +52,63 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 }
 
 // ─── Window that never steals game touches ───────────────────────────────────
+
+// ── Drag ─────────────────────────────────────────────────────────────────────
+@interface AstralDrag : NSObject
++ (void)attach:(UIView*)v;
+@end
+@implementation AstralDrag
++ (void)attach:(UIView*)v {
+    if (!v) return;
+    for (UIGestureRecognizer* g in v.gestureRecognizers) {
+        if ([g isKindOfClass:UIPanGestureRecognizer.class]) return;
+    }
+    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
+    pan.maximumNumberOfTouches = 1;
+    [v addGestureRecognizer:pan];
+}
++ (void)onPan:(UIPanGestureRecognizer*)pan {
+    UIView* v = pan.view;
+    if (!v) return;
+    CGPoint tr = [pan translationInView:v.superview];
+    if (pan.state == UIGestureRecognizerStateBegan || pan.state == UIGestureRecognizerStateChanged) {
+        CGPoint c = v.center;
+        c.x += tr.x; c.y += tr.y;
+        // clamp inside superview
+        CGRect sb = v.superview.bounds;
+        CGFloat hw = v.bounds.size.width * 0.5;
+        CGFloat hh = v.bounds.size.height * 0.5;
+        c.x = MAX(hw, MIN(sb.size.width - hw, c.x));
+        c.y = MAX(hh, MIN(sb.size.height - hh, c.y));
+        v.center = c;
+        [pan setTranslation:CGPointZero inView:v.superview];
+    }
+}
+@end
+
 @interface ACW : UIWindow @end
 @implementation ACW
+// Strict: only panel + FAB eat touches. Everything else → game.
 - (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
-    UIView* hit = [super hitTest:point withEvent:event];
-    if (hit == self || hit == self.rootViewController.view) return nil;
-    NSString* cls = NSStringFromClass(hit.class);
-    if ([cls containsString:@"TextField"] || hit.tag == 99001) {
-        for (UIView* s in hit.subviews) {
-            CGPoint p = [hit convertPoint:point toView:s];
-            if (!s.hidden && s.userInteractionEnabled && CGRectContainsPoint(s.bounds, p)) {
-                UIView* h2 = [s hitTest:p withEvent:event];
-                if (h2 && h2 != s) return h2;
-            }
+    extern UIView* g_panel_ref(void);
+    extern UIView* g_fab_ref(void);
+    UIView* panel = g_panel_ref();
+    UIView* fab = g_fab_ref();
+    if (panel && !panel.hidden && panel.alpha > 0.01) {
+        CGPoint lp = [self convertPoint:point toView:panel];
+        if (CGRectContainsPoint(panel.bounds, lp)) {
+            UIView* h = [panel hitTest:lp withEvent:event];
+            if (h) return h;
         }
-        return nil;
     }
-    return hit;
+    if (fab && !fab.hidden) {
+        CGPoint lp = [self convertPoint:point toView:fab];
+        if (CGRectContainsPoint(fab.bounds, lp)) {
+            UIView* h = [fab hitTest:lp withEvent:event];
+            if (h) return h;
+        }
+    }
+    return nil;
 }
 - (BOOL)canBecomeKeyWindow { return NO; }
 @end
@@ -88,6 +128,10 @@ static ACW*          g_overlay = nil;
 static UIView*       g_panel   = nil;
 static UIView*       g_fab     = nil;
 static UIView*       g_content = nil;
+
+UIView* g_panel_ref(void) { return g_panel; }
+UIView* g_fab_ref(void) { return g_fab; }
+
 static UIScrollView* g_scroll  = nil;
 static CADisplayLink* g_tick   = nil;
 static UITextField*  g_secureField = nil;
@@ -434,6 +478,7 @@ static void buildPanel(UIView* host) {
     [g_scroll addSubview:g_content];
 
     [host addSubview:g_panel];
+    [AstralDrag attach:g_panel];
     rebuildContent();
 }
 
@@ -466,6 +511,7 @@ static void buildFab(UIView* host) {
     }] forControlEvents:UIControlEventTouchUpInside];
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
+    [AstralDrag attach:g_fab];
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
