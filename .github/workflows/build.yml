@@ -16,47 +16,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect project root
-        id: root
-        run: |
-          set -e
-          echo "== pwd =="
-          pwd
-          echo "== ls =="
-          ls -la
-          if [ -f src/Menu.mm ] && [ -f src/Features.mm ]; then
-            echo "root=." >> "$GITHUB_OUTPUT"
-            echo "Project at repo root"
-          elif [ -f astral_full/src/Menu.mm ]; then
-            echo "root=astral_full" >> "$GITHUB_OUTPUT"
-            echo "Project in astral_full/"
-          else
-            echo "Sources not found"
-            find . -name "*.mm" 2>/dev/null | head -30
-            exit 1
-          fi
-
-      - name: Show sources
-        working-directory: ${{ steps.root.outputs.root }}
-        run: |
-          echo "== tree =="
-          ls -la
-          ls -la src include 2>/dev/null || true
-          wc -l src/*.mm include/*.h 2>/dev/null || true
-
-      - name: Xcode info
+      - name: Xcode
         run: |
           xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
+          echo "SDK=$(xcrun --sdk iphoneos --show-sdk-path)"
           xcrun -sdk iphoneos clang++ --version
 
-      - name: Build dylib
-        working-directory: ${{ steps.root.outputs.root }}
+      - name: List sources
         run: |
-          set -euo pipefail
+          ls -la
+          ls -la src include
+          wc -l src/*.mm include/*.h
+
+      - name: Build
+        run: |
+          set -e
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "SDK=$SDK"
           mkdir -p out
+          set +e
           xcrun -sdk iphoneos clang++ \
             -std=c++17 \
             -fobjc-arc \
@@ -65,7 +42,7 @@ jobs:
             -arch arm64 \
             -isysroot "$SDK" \
             -miphoneos-version-min=14.0 \
-            -I./include \
+            -I"$PWD/include" \
             -fvisibility=hidden \
             -dynamiclib \
             -install_name @rpath/AstralCheat.dylib \
@@ -77,29 +54,29 @@ jobs:
             -o out/AstralCheat.dylib \
             src/Menu.mm \
             src/Features.mm \
-            2>&1 | tee build.log
-          echo "== result =="
+            > build.log 2>&1
+          RC=$?
+          set -e
+          echo "clang exit=$RC"
+          echo "===== build.log ====="
+          cat build.log
+          if [ "$RC" -ne 0 ]; then
+            echo "BUILD FAILED"
+            exit $RC
+          fi
           ls -lh out/AstralCheat.dylib
-          file out/AstralCheat.dylib
-          cp out/AstralCheat.dylib "$GITHUB_WORKSPACE/AstralCheat.dylib"
+          cp out/AstralCheat.dylib AstralCheat.dylib
+          echo "BUILD OK"
 
-      - name: On failure show log
-        if: failure()
-        working-directory: ${{ steps.root.outputs.root }}
-        run: |
-          echo "########## build.log ##########"
-          cat build.log 2>/dev/null || echo "(no build.log)"
-          echo "########## sources ##########"
-          ls -la src include 2>/dev/null || true
-
-      - name: Upload logs
+      - name: Upload logs always
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
-            **/build.log
+            build.log
             AstralCheat.dylib
+            out/AstralCheat.dylib
           if-no-files-found: ignore
 
       - name: Upload dylib
