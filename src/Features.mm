@@ -74,16 +74,21 @@ static void* pc_tr(void* pc) {
     return get_tr(pc);
 }
 
-// Unity W2S on iOS returns pixels; UIKit ESP view is in points → / scale.
+// Unity W2S → UIKit points. nativeScale more accurate on notched devices.
 static Vec3 w2s(void* cam, Vec3 w) {
     Vec3 o{};
     if (!ok_ptr(cam) || !unity_base()) return o;
     using F = void (*)(void*, Vec3*, int, Vec3*);
     R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
-    float s = (float)[UIScreen mainScreen].scale;
+    UIScreen* sc = [UIScreen mainScreen];
+    float s = (float)sc.nativeScale;
+    if (s < 1.f) s = (float)sc.scale;
     if (s < 1.f) s = 1.f;
     o.x /= s;
     o.y /= s;
+    // residual top-right bias from safe-area / unity view inset
+    // shift left & down a few points (after Y-flip down = +y in unity space before flip)
+    o.x -= 0.f; // calibrated in draw if needed
     return o;
 }
 
@@ -266,15 +271,23 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
+        // LIVE position every frame — cached pos lags behind camera → float
         Vec3 feet = p.pos;
-        Vec3 head = {p.pos.x, p.pos.y + headY, p.pos.z};
+        if (ok_ptr(p.tr)) {
+            Vec3 live = get_pos(p.tr);
+            if (live.x == live.x && fabsf(live.x) < 1e5f)
+                feet = live;
+        }
+        Vec3 head = {feet.x, feet.y + headY, feet.z};
         Vec3 sf = w2s(cam, feet);
         Vec3 sh = w2s(cam, head);
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
-        CGFloat fy = H - sf.y;
-        CGFloat hy = H - sh.y;
-        CGFloat fx = sf.x, hx = sh.x;
+        // Unity bottom-up → UIKit; residual bias: slightly left+down
+        CGFloat fx = sf.x - 4.f;
+        CGFloat hx = sh.x - 4.f;
+        CGFloat fy = H - sf.y + 6.f;
+        CGFloat hy = H - sh.y + 6.f;
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
@@ -340,10 +353,53 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
     }
 }
 
-// SAFE: never write GunParameters SO (shared asset → crash)
+// Recoil % → set GunParameters multipliers ABSOLUTELY, only when value changes.
+// Writing every frame caused compound scale + crash; once-per-change is stable.
 static void apply_recoil(void* localPc) {
-    (void)localPc;
-    (void)g_recoilPct;
+    static float lastPct = -1.f;
+    static void* lastParams = nullptr;
+    float pct = g_recoilPct.load();
+    if (!ok_ptr(localPc)) return;
+
+    void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
+    if (!ok_ptr(wry)) return;
+    void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
+    if (!ok_ptr(wc) && unity_base()) {
+        using F = void* (*)(void*);
+        wc = R<F>(0x162E58C)(wry);
+    }
+    if (!ok_ptr(wc)) return;
+    void* params = *(void**)((char*)wc + Offsets::WC_weaponParams);
+    if (!ok_ptr(params)) return;
+
+    if (fabsf(pct - lastPct) < 0.5f && params == lastParams) return;
+    lastPct = pct;
+    lastParams = params;
+
+    float mul = 1.f - pct / 100.f;
+    if (mul < 0.f) mul = 0.f;
+    if (mul > 1.f) mul = 1.f;
+
+    auto setf = [](void* b, size_t o, float v) {
+        if (!ok_ptr(b)) return;
+        float* p = (float*)((char*)b + o);
+        // only touch plausible floats
+        if (*p == *p && *p >= 0.f && *p < 50.f) *p = v;
+    };
+    setf(params, Offsets::GP_recoilMultCrouch, mul);
+    setf(params, Offsets::GP_recoilAimMult,    mul);
+    setf(params, Offsets::GP_recoilAimCrouch,  mul);
+
+    if (pct >= 99.f) {
+        int* rc = (int*)((char*)params + Offsets::GP_recoilControl);
+        if (*rc >= 0 && *rc < 500) *rc = 100;
+        void* rp = *(void**)((char*)params + Offsets::GP_recoilParams);
+        if (ok_ptr(rp)) {
+            setf(rp, Offsets::RP_horiz,  0.01f);
+            setf(rp, Offsets::RP_vert,   0.01f);
+            setf(rp, Offsets::RP_camDev, 0.01f);
+        }
+    }
 }
 
 static void run_aim(void* cam, void* camTr) {
@@ -391,7 +447,12 @@ static void run_aim(void* cam, void* camTr) {
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-        Vec3 bone = {p.pos.x, p.pos.y + boneY, p.pos.z};
+        Vec3 base = p.pos;
+        if (ok_ptr(p.tr)) {
+            Vec3 live = get_pos(p.tr);
+            if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
+        }
+        Vec3 bone = {base.x, base.y + boneY, base.z};
         Vec3 sc = w2s(cam, bone);
         if (sc.z < 0.05f) continue;
         float sx = sc.x;
@@ -417,19 +478,32 @@ static void run_aim(void* cam, void* camTr) {
     if (pitch < -85.f) pitch = -85.f;
     if (pitch >  85.f) pitch =  85.f;
 
+    // 1) AimController angle fields (if they are view angles)
     float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
     float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
     float curP = *aPitch, curY = *aYaw;
     if (curP == curP && fabsf(curP) < 360.f)
         *aPitch = curP + (pitch - curP) / sm;
-    if (curY == curY && fabsf(curY) < 500.f)
-        *aYaw   = curY + (yaw - curY) / sm;
+    if (curY == curY && fabsf(curY) < 500.f) {
+        // unwrap yaw delta
+        float dy = yaw - curY;
+        while (dy >  180.f) dy -= 360.f;
+        while (dy < -180.f) dy += 360.f;
+        *aYaw = curY + dy / sm;
+    }
 
-    // also rotate camTransform toward target (smooth)
+    // 2) Force camTransform to look at smoothed target
     if (ok_ptr(aimTr) && unity_base()) {
         Vec3 up{0, 1, 0};
         using Look = void (*)(void*, Vec3*, Vec3*);
         R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
+    }
+
+    // 3) Same on main camera transform as fallback
+    if (ok_ptr(camTr) && camTr != aimTr && unity_base()) {
+        Vec3 up{0, 1, 0};
+        using Look = void (*)(void*, Vec3*, Vec3*);
+        R<Look>(Offsets::Transform_Internal_LookAt_Inj)(camTr, &smT, &up);
     }
 }
 
@@ -447,8 +521,9 @@ void Astral_FeaturesTick() {
 
     bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load();
     bool wantAim = g_aimbot.load();
+    bool wantRec = g_recoilPct.load() > 0.5f;
     bool wantFov = g_fovDraw.load();
-    if (!wantEsp && !wantAim && !wantFov) return;
+    if (!wantEsp && !wantAim && !wantRec && !wantFov) return;
     if (!unity_base()) return;
 
     void* cam = main_cam();
@@ -456,16 +531,16 @@ void Astral_FeaturesTick() {
     void* camTr = get_tr(cam);
     if (!ok_ptr(camTr)) return;
 
-    if (wantEsp || wantAim) {
+    if (wantEsp || wantAim || wantRec) {
         size_t n = 0;
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             n = g_list.size();
         }
-        if (n == 0 || ++g_ctr >= 8) {
+        if (n == 0 || ++g_ctr >= 3) {
             g_ctr = 0;
             refresh(camTr);
         }
     }
-    if (wantAim) run_aim(cam, camTr);
+    if (wantAim || wantRec) run_aim(cam, camTr);
 }
