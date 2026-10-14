@@ -283,11 +283,11 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 sh = w2s(cam, head);
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
-        // Unity bottom-up → UIKit; residual bias: slightly left+down
-        CGFloat fx = sf.x - 4.f;
-        CGFloat hx = sh.x - 4.f;
-        CGFloat fy = H - sf.y + 6.f;
-        CGFloat hy = H - sh.y + 6.f;
+        // Unity bottom-up → UIKit; nudge up (was low) and slight left
+        CGFloat fx = sf.x - 3.f;
+        CGFloat hx = sh.x - 3.f;
+        CGFloat fy = H - sf.y - 8.f;
+        CGFloat hy = H - sh.y - 8.f;
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
@@ -414,8 +414,7 @@ static void run_aim(void* cam, void* camTr) {
     apply_recoil(localPc);
 
     if (!g_aimbot.load()) return;
-    if (!ok_ptr(cam) || !ok_ptr(camTr)) return;
-    if (!ok_ptr(localPc)) return;
+    if (!ok_ptr(cam) || !ok_ptr(camTr) || !ok_ptr(localPc)) return;
 
     void* aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
     if (!ok_ptr(aimCtrl)) return;
@@ -439,6 +438,7 @@ static void run_aim(void* cam, void* camTr) {
         default: boneY = 1.55f; break;
     }
 
+    // ONLY target inside FOV circle — no fallback
     Vec3 best{};
     bool have = false;
     float bestScore = 1e9f;
@@ -455,16 +455,20 @@ static void run_aim(void* cam, void* camTr) {
         Vec3 bone = {base.x, base.y + boneY, base.z};
         Vec3 sc = w2s(cam, bone);
         if (sc.z < 0.05f) continue;
-        float sx = sc.x;
-        float sy = scr.height - sc.y;
+
+        float sx = sc.x - 3.f;
+        float sy = (scr.height - sc.y) - 8.f; // same bias as ESP
         float dx = sx - cx, dy = sy - cy;
         float d2 = sqrtf(dx*dx + dy*dy);
-        if (d2 > fovR) continue;
+        if (d2 > fovR) continue; // outside FOV — ignore
         if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
     }
-    if (!have) return;
+    if (!have) return; // silent: do nothing if nobody in FOV
 
+    // hard snap when target in FOV (smooth still applied lightly)
     float sm = fmaxf(1.f, g_smooth.load());
+    if (g_silent.load()) sm = fmaxf(1.f, sm * 0.5f); // silent = faster lock
+
     static Vec3 smT{};
     static bool ini = false;
     if (!ini) { smT = best; ini = true; }
@@ -478,32 +482,23 @@ static void run_aim(void* cam, void* camTr) {
     if (pitch < -85.f) pitch = -85.f;
     if (pitch >  85.f) pitch =  85.f;
 
-    // 1) AimController angle fields (if they are view angles)
     float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
     float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
     float curP = *aPitch, curY = *aYaw;
     if (curP == curP && fabsf(curP) < 360.f)
         *aPitch = curP + (pitch - curP) / sm;
     if (curY == curY && fabsf(curY) < 500.f) {
-        // unwrap yaw delta
         float dy = yaw - curY;
         while (dy >  180.f) dy -= 360.f;
         while (dy < -180.f) dy += 360.f;
         *aYaw = curY + dy / sm;
     }
 
-    // 2) Force camTransform to look at smoothed target
-    if (ok_ptr(aimTr) && unity_base()) {
+    // visible aim: LookAt. silent: angles only (no camera spin)
+    if (!g_silent.load() && ok_ptr(aimTr) && unity_base()) {
         Vec3 up{0, 1, 0};
         using Look = void (*)(void*, Vec3*, Vec3*);
         R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
-    }
-
-    // 3) Same on main camera transform as fallback
-    if (ok_ptr(camTr) && camTr != aimTr && unity_base()) {
-        Vec3 up{0, 1, 0};
-        using Look = void (*)(void*, Vec3*, Vec3*);
-        R<Look>(Offsets::Transform_Internal_LookAt_Inj)(camTr, &smT, &up);
     }
 }
 
