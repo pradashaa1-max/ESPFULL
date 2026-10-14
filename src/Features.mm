@@ -74,12 +74,16 @@ static void* pc_tr(void* pc) {
     return get_tr(pc);
 }
 
-// Path that previously DID draw (eye=2). No scale divide.
+// Unity W2S on iOS returns pixels; UIKit ESP view is in points → / scale.
 static Vec3 w2s(void* cam, Vec3 w) {
     Vec3 o{};
     if (!ok_ptr(cam) || !unity_base()) return o;
     using F = void (*)(void*, Vec3*, int, Vec3*);
     R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
+    float s = (float)[UIScreen mainScreen].scale;
+    if (s < 1.f) s = 1.f;
+    o.x /= s;
+    o.y /= s;
     return o;
 }
 
@@ -266,7 +270,7 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 head = {p.pos.x, p.pos.y + headY, p.pos.z};
         Vec3 sf = w2s(cam, feet);
         Vec3 sh = w2s(cam, head);
-        if (sf.z < 0.1f && sh.z < 0.1f) continue;
+        if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
         CGFloat fy = H - sf.y;
         CGFloat hy = H - sh.y;
@@ -389,7 +393,7 @@ static void run_aim(void* cam, void* camTr) {
 
         Vec3 bone = {p.pos.x, p.pos.y + boneY, p.pos.z};
         Vec3 sc = w2s(cam, bone);
-        if (sc.z < 0.1f) continue;
+        if (sc.z < 0.05f) continue;
         float sx = sc.x;
         float sy = scr.height - sc.y;
         float dx = sx - cx, dy = sy - cy;
@@ -420,6 +424,13 @@ static void run_aim(void* cam, void* camTr) {
         *aPitch = curP + (pitch - curP) / sm;
     if (curY == curY && fabsf(curY) < 500.f)
         *aYaw   = curY + (yaw - curY) / sm;
+
+    // also rotate camTransform toward target (smooth)
+    if (ok_ptr(aimTr) && unity_base()) {
+        Vec3 up{0, 1, 0};
+        using Look = void (*)(void*, Vec3*, Vec3*);
+        R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
+    }
 }
 
 void Astral_FeaturesTick() {
