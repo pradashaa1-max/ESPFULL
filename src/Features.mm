@@ -58,7 +58,8 @@ static uintptr_t unity_base() {
     uint32_t n = _dyld_image_count();
     for (uint32_t i = 0; i < n; i++) {
         const char* name = _dyld_get_image_name(i);
-        if (name && strstr(name, "UnityFramework")) {
+        if (!name) continue;
+        if (strstr(name, "UnityFramework") || strstr(name, "UnityFramework.framework")) {
             g_unity = (uintptr_t)_dyld_get_image_header(i);
             break;
         }
@@ -181,7 +182,8 @@ static std::vector<void*> find_players_raw() {
     if (!api.ready && !api.init()) return out;
     if (!api.class_get_type || !api.type_get_object) return out;
 
-    Il2CppClass* pcKlass = api.find_class("", "PlayerController");
+    Il2CppClass* pcKlass = api.find_class("Axlebolt.Standoff.Player", "PlayerController");
+    if (!pcKlass) pcKlass = api.find_class("", "PlayerController");
     if (!pcKlass) pcKlass = api.find_class("Assembly-CSharp", "PlayerController");
     if (!pcKlass) return out;
 
@@ -272,39 +274,35 @@ static void refresh_players(void* camTr) {
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (!ctx) return;
 
-    CGSize scr = self.bounds.size;
-    if (scr.width < 10 || scr.height < 10) return;
-    // normalize to landscape if needed (w should be longer side for FOV math)
-    // drawing still uses actual bounds center
+    CGRect bb = self.bounds;
+    CGFloat w = CGRectGetWidth(bb);
+    CGFloat h = CGRectGetHeight(bb);
+    if (w < 2 || h < 2) return;
+    CGSize scr = CGSizeMake(w, h);
+
+    // FOV FIRST — always, no dependency on camera/il2cpp
+    if (g_fovDraw.load()) {
+        CGFloat cx = w * 0.5;
+        CGFloat cy = h * 0.5;
+        CGFloat shortSide = (w < h) ? w : h;
+        CGFloat r = shortSide * (0.04f + (g_fov.load() / 30.f) * 0.20f);
+        CGContextSaveGState(ctx);
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.25 green:0.65 blue:1.0 alpha:0.95].CGColor);
+        CGContextSetLineWidth(ctx, 2.0);
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - r, cy - r, r * 2.0, r * 2.0));
+        CGContextSetLineWidth(ctx, 1.2);
+        CGContextMoveToPoint(ctx, cx - 6, cy);
+        CGContextAddLineToPoint(ctx, cx + 6, cy);
+        CGContextMoveToPoint(ctx, cx, cy - 6);
+        CGContextAddLineToPoint(ctx, cx, cy + 6);
+        CGContextStrokePath(ctx);
+        CGContextRestoreGState(ctx);
+    }
 
     void* cam = main_camera();
     if (!cam) return;
     void* camTr = component_transform(cam);
     Vec3 camPos = camTr ? get_pos(camTr) : Vec3{};
-
-    // FOV circle — geometric center of this view
-    if (g_fovDraw.load()) {
-        CGRect bb = self.bounds;
-        CGFloat w = CGRectGetWidth(bb);
-        CGFloat h = CGRectGetHeight(bb);
-        if (w < 10 || h < 10) return;
-        CGFloat cx = CGRectGetMidX(bb);
-        CGFloat cy = CGRectGetMidY(bb);
-        CGFloat shortSide = MIN(w, h);
-        CGFloat r = shortSide * (0.04f + (g_fov.load() / 30.f) * 0.20f);
-        CGContextSaveGState(ctx);
-        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.25 green:0.65 blue:1.0 alpha:0.9].CGColor);
-        CGContextSetLineWidth(ctx, 1.8);
-        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - r, cy - r, r * 2.0, r * 2.0));
-        // tiny crosshair mark at true center for alignment check
-        CGContextSetLineWidth(ctx, 1.0);
-        CGContextMoveToPoint(ctx, cx - 4, cy);
-        CGContextAddLineToPoint(ctx, cx + 4, cy);
-        CGContextMoveToPoint(ctx, cx, cy - 4);
-        CGContextAddLineToPoint(ctx, cx, cy + 4);
-        CGContextStrokePath(ctx);
-        CGContextRestoreGState(ctx);
-    }
 
     bool box  = g_espBox.load();
     bool skel = g_espSkel.load();
@@ -500,48 +498,34 @@ static void refresh_players(void* camTr) {
 static ESPView* g_espView = nil;
 
 void Astral_EnsureFOVOverlay(UIWindow* win) {
-    // Always size ESP to the REAL key window (game), not our overlay.
-    // This keeps FOV at the true screen center in landscape.
-    UIWindow* gameWin = nil;
-    for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
-        if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
-            if (w.isKeyWindow) { gameWin = w; break; }
-        }
-        if (gameWin) break;
+    if (!win) return;
+    UIView* root = win.rootViewController.view ?: win;
+    // FORCE full-window frame in root space — origin always (0,0)
+    CGRect b = root.bounds;
+    if (b.size.width < 2 || b.size.height < 2) {
+        b = win.bounds;
     }
-    if (!gameWin) gameWin = win;
-    if (!gameWin) return;
-
-    CGRect b = gameWin.bounds;
-    if (b.size.width < 2 || b.size.height < 2)
-        b = [UIScreen mainScreen].bounds;
-
-    // Parent: prefer secure root for hide-rec, else overlay root, else game window
-    UIView* root = Astral_SecureRoot;
-    if (!root && win) root = win.rootViewController.view;
-    if (!root) root = gameWin;
-
-    // Map game bounds into root coordinate space
-    CGRect frameInRoot = [root convertRect:b fromView:gameWin];
-    if (frameInRoot.size.width < 2) frameInRoot = root.bounds;
+    b.origin = CGPointZero;
 
     if (!g_espView) {
-        g_espView = [[ESPView alloc] initWithFrame:frameInRoot];
+        g_espView = [[ESPView alloc] initWithFrame:b];
         g_espView.userInteractionEnabled = NO;
         g_espView.backgroundColor = UIColor.clearColor;
         g_espView.opaque = NO;
+        g_espView.clearsContextBeforeDrawing = YES;
         g_espView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         g_espView.contentMode = UIViewContentModeRedraw;
         [root insertSubview:g_espView atIndex:0];
     } else {
-        if (!CGRectEqualToRect(g_espView.frame, frameInRoot))
-            g_espView.frame = frameInRoot;
+        g_espView.frame = b;
+        g_espView.center = CGPointMake(b.size.width * 0.5, b.size.height * 0.5);
         if (g_espView.superview != root) {
             [g_espView removeFromSuperview];
             [root insertSubview:g_espView atIndex:0];
         }
     }
+    // Keep ESP under menu/fab
+    [root sendSubviewToBack:g_espView];
 }
 
 
@@ -620,38 +604,32 @@ extern "C" bool Astral_GetSilentDir(float* x, float* y, float* z) {
 
 // ─── Frame tick ──────────────────────────────────────────────────────────────
 void Astral_FeaturesTick() {
+    // Always keep ESP view full-screen + redraw (FOV works even pre-match)
+    if (g_espView) {
+        UIView* root = g_espView.superview;
+        if (root) {
+            CGRect b = root.bounds;
+            b.origin = CGPointZero;
+            if (b.size.width > 2 && b.size.height > 2)
+                g_espView.frame = b;
+        }
+        [g_espView setNeedsDisplay];
+    }
+
     if (!unity_base()) return;
 
     void* cam = main_camera();
     void* camTr = cam ? component_transform(cam) : nullptr;
 
-    // refresh player list every 12 frames (~5 Hz) — avoids FindObjectsOfType spam
     if (++g_refresh_ctr >= 12) {
         g_refresh_ctr = 0;
         refresh_players(camTr);
     }
 
     CGSize scr = UIScreen.mainScreen.bounds.size;
-    if (scr.height > scr.width) {
-        // force landscape dimensions for aim FOV math
+    if (scr.height > scr.width)
         scr = CGSizeMake(scr.height, scr.width);
-    }
     if (g_espView && g_espView.bounds.size.width > 10)
         scr = g_espView.bounds.size;
     run_aim(cam, camTr, scr);
-
-    // redraw ESP + keep frame centered on full screen
-    if (g_espView) {
-        UIView* root = Astral_SecureRoot ?: g_espView.superview;
-        if (root) {
-            CGRect b = root.bounds;
-            if (b.size.width > 10 && !CGRectEqualToRect(g_espView.frame, b))
-                g_espView.frame = b;
-            if (g_espView.superview != root) {
-                [g_espView removeFromSuperview];
-                [root insertSubview:g_espView atIndex:0];
-            }
-        }
-        [g_espView setNeedsDisplay];
-    }
 }

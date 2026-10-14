@@ -143,8 +143,7 @@ static void applyHideRec(UIView* root) {
     if (!root) return;
     BOOL on = g_hideRec.load();
 
-    // CRITICAL: panel + FAB always live on the normal root so game touches work.
-    // Only ESP goes into the secure layer (hide from screenshots/recording).
+    // panel + FAB always on normal root
     if (g_panel && g_panel.superview != root) {
         [g_panel removeFromSuperview];
         [root addSubview:g_panel];
@@ -154,37 +153,24 @@ static void applyHideRec(UIView* root) {
         [root addSubview:g_fab];
     }
 
+    // ESP must stay on root (full frame). Secure field sits behind as capture shield.
+    Astral_SecureRoot = nil;
+
     if (on) {
         if (!g_secureField) {
             g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
             g_secureField.secureTextEntry = YES;
-            g_secureField.userInteractionEnabled = NO; // never steal touches
+            g_secureField.userInteractionEnabled = NO;
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+        }
+        g_secureField.frame = root.bounds;
+        if (g_secureField.superview != root)
             [root insertSubview:g_secureField atIndex:0];
-        } else {
-            g_secureField.frame = root.bounds;
-            if (g_secureField.superview != root)
-                [root insertSubview:g_secureField atIndex:0];
-        }
-        UIView* container = g_secureField.subviews.firstObject ?: g_secureField;
-        container.userInteractionEnabled = NO;
-        container.tag = 99001;
-        UIView* host = [container viewWithTag:99002];
-        if (!host) {
-            host = [[UIView alloc] initWithFrame:root.bounds];
-            host.tag = 99002;
-            host.backgroundColor = UIColor.clearColor;
-            host.userInteractionEnabled = NO;
-            host.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
-            [container addSubview:host];
-        } else {
-            host.frame = root.bounds;
-            host.userInteractionEnabled = NO;
-        }
-        Astral_SecureRoot = host; // ESP only
+        // Put ESP above secure field but still under menu
+        // (EnsureFOV inserts ESP; we only keep secure at back)
+        [root sendSubviewToBack:g_secureField];
     } else {
-        Astral_SecureRoot = nil;
         if (g_secureField) {
             [g_secureField removeFromSuperview];
             g_secureField = nil;
