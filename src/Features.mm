@@ -114,12 +114,21 @@ struct PSnap {
     Vec3  pos;
     int   team;
     bool  local;
-    float hp;      // 0..1 or -1
-    float armor;   // -1 unknown
-    int   ammo;    // -1 unknown
+    float hp;
+    float armor;
+    int   ammo;      // current
+    int   ammoMax;   // magazine capacity
     char  name[32];
     char  weapon[24];
 };
+
+struct WorldSnap {
+    Vec3  pos;
+    float timer;     // bomb seconds left, or -1
+    char  label[32]; // "HE" / "FLASH" / "BOMB 25s"
+};
+static std::vector<WorldSnap> g_world;
+
 static std::mutex g_mtx;
 static std::vector<PSnap> g_list;
 static int g_ctr = 0;
@@ -244,8 +253,8 @@ static void refresh(void* camTr) {
         s.hp = read_hp01(pc);
         s.armor = -1.f;
         s.ammo = -1;
+        s.ammoMax = -1;
         s.weapon[0] = 0;
-        // weapon name + ammo from GunController
         void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
         if (ok_ptr(wry)) {
             void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
@@ -254,26 +263,37 @@ static void refresh(void* camTr) {
                 wc = R<F>(0x162E58C)(wry);
             }
             if (ok_ptr(wc)) {
-                void* ns = *(void**)((char*)wc + 0x58); // name string
+                void* ns = *(void**)((char*)wc + 0x58);
                 if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                int a0 = *(int*)((char*)wc + 0xD8);
-                int a1 = *(int*)((char*)wc + 0xDC);
-                if (a0 >= 0 && a0 <= 200) s.ammo = a0;
-                else if (a1 >= 0 && a1 <= 200) s.ammo = a1;
+                // BHEHACCGBBGGBCH @ 0xE0 / 0xE8 — current & reserve/capacity
+                // struct: int max@0x10, int cur@0x14 (after object header)
+                auto readAmmoObj = [](void* ao, int* cur, int* mx) {
+                    if (!ok_ptr(ao)) return;
+                    int a = *(int*)((char*)ao + 0x14);
+                    int b = *(int*)((char*)ao + 0x10);
+                    if (a >= 0 && a <= 200) *cur = a;
+                    if (b >= 0 && b <= 200) *mx = b;
+                    // sometimes short property path: value in low 16 bits at 0x14
+                    if (*cur < 0) {
+                        short sh = *(short*)((char*)ao + 0x14);
+                        if (sh >= 0 && sh <= 200) *cur = sh;
+                    }
+                };
+                void* aObj0 = *(void**)((char*)wc + 0xE0);
+                void* aObj1 = *(void**)((char*)wc + 0xE8);
+                readAmmoObj(aObj0, &s.ammo, &s.ammoMax);
+                if (s.ammoMax < 0) readAmmoObj(aObj1, &s.ammoMax, &s.ammoMax);
+                // if still empty try ints 0xD8/0xDC as cur only
+                if (s.ammo < 0) {
+                    int a0 = *(int*)((char*)wc + 0xD8);
+                    if (a0 >= 0 && a0 <= 200) s.ammo = a0;
+                }
             }
         }
-        // armor best-effort from hit controller floats
         void* hit = *(void**)((char*)pc + Offsets::PC_hitController);
         if (ok_ptr(hit)) {
-            for (size_t o : {0xC8ul, 0xD0ul, 0xD4ul, 0xD8ul}) {
-                float v = *(float*)((char*)hit + o);
-                if (v == v && v >= 1.f && v <= 100.f && s.hp < 0.f) {
-                    // already used for hp candidates; skip
-                }
-                if (v == v && v >= 0.f && v <= 100.f && s.armor < 0.f && o == 0xD4) {
-                    s.armor = v;
-                }
-            }
+            float v = *(float*)((char*)hit + 0xD4);
+            if (v == v && v >= 0.f && v <= 100.f) s.armor = v;
         }
         if (s.local) mines++;
         float d = vdist(p, cpos);
@@ -290,8 +310,109 @@ static void refresh(void* camTr) {
     if (mines == 0 && !tmp.empty() && bestD < 5.f)
         tmp[bestIdx].local = true;
 
+    // --- world: planted bomb + flying grenades ---
+    std::vector<WorldSnap> wtmp;
+    auto& api = IL2CPP();
+    if (api.ready || api.init()) {
+        auto collectType = [&](const char* ns, const char* name, auto handler) {
+            Il2CppClass* k = api.find_class(ns, name);
+            if (!k) k = api.find_class("", name);
+            if (!k || !api.class_get_type || !api.type_get_object) return;
+            const Il2CppType* ty = api.class_get_type(k);
+            Il2CppObject* typeObj = ty ? api.type_get_object(ty) : nullptr;
+            if (!typeObj) return;
+            std::vector<void*> arr;
+            Il2CppClass* objK = api.find_class("UnityEngine", "Object");
+            if (objK) {
+                const MethodInfo* fot = api.find_method(objK, "FindObjectsOfType", 1);
+                if (fot) {
+                    void* exc = nullptr;
+                    void* args[1] = { typeObj };
+                    Il2CppObject* a = api.runtime_invoke(fot, nullptr, args, &exc);
+                    if (!exc) push_array(a, arr, api);
+                }
+            }
+            for (void* o : arr) handler(o);
+        };
+
+        collectType("Axlebolt.Standoff.Inventory.Grenade", "DroppedGrenadeController",
+                    [&](void* o) {
+            // Transform FAFCFFABDEEBFAH — try get_tr
+            void* tr = get_tr(o);
+            if (!ok_ptr(tr)) {
+                // field scan common transform slots
+                for (size_t off : {0x18ul, 0x20ul, 0x28ul, 0x30ul}) {
+                    void* t = *(void**)((char*)o + off);
+                    if (ok_ptr(t)) { tr = t; break; }
+                }
+            }
+            if (!ok_ptr(tr)) return;
+            Vec3 pos = get_pos(tr);
+            if (pos.x != pos.x) return;
+            WorldSnap w{};
+            w.pos = pos;
+            w.timer = -1.f;
+            // GrenadeParameters @ various — name from parameters string if any
+            snprintf(w.label, sizeof(w.label), "GRENADE");
+            void* gp = *(void**)((char*)o + 0x18); // often parameters
+            if (ok_ptr(gp)) {
+                // try name field on parameters
+                void* ns = *(void**)((char*)gp + 0x10);
+                char tmpn[24]{};
+                if (ok_ptr(ns)) read_str(ns, tmpn, sizeof(tmpn));
+                if (tmpn[0]) snprintf(w.label, sizeof(w.label), "%s", tmpn);
+            }
+            wtmp.push_back(w);
+        });
+
+        collectType("Axlebolt.Standoff.Inventory.Bomb", "PlantedBombController",
+                    [&](void* o) {
+            void* tr = *(void**)((char*)o + 0x30); // CEHBGAFBGBCFCAC
+            if (!ok_ptr(tr)) tr = *(void**)((char*)o + 0xB0);
+            if (!ok_ptr(tr)) tr = get_tr(o);
+            if (!ok_ptr(tr)) return;
+            Vec3 pos = get_pos(tr);
+            if (pos.x != pos.x) return;
+            WorldSnap w{};
+            w.pos = pos;
+            // float remaining @ 0xA8, double plant time @ 0xA0
+            float rem = *(float*)((char*)o + 0xA8);
+            if (!(rem == rem) || rem < 0.f || rem > 120.f) {
+                double plant = *(double*)((char*)o + 0xA0);
+                // fallback: 40s default CS-like if we only have plant stamp — skip
+                rem = -1.f;
+                (void)plant;
+            }
+            w.timer = rem;
+            if (rem >= 0.f)
+                snprintf(w.label, sizeof(w.label), "BOMB %.0fs", rem);
+            else
+                snprintf(w.label, sizeof(w.label), "BOMB");
+            wtmp.push_back(w);
+        });
+
+        // also try without namespace
+        if (wtmp.empty()) {
+            collectType("", "PlantedBombController", [&](void* o) {
+                void* tr = *(void**)((char*)o + 0x30);
+                if (!ok_ptr(tr)) tr = get_tr(o);
+                if (!ok_ptr(tr)) return;
+                Vec3 pos = get_pos(tr);
+                if (pos.x != pos.x) return;
+                WorldSnap w{};
+                w.pos = pos;
+                float rem = *(float*)((char*)o + 0xA8);
+                w.timer = (rem == rem && rem >= 0.f && rem <= 120.f) ? rem : -1.f;
+                if (w.timer >= 0.f) snprintf(w.label, sizeof(w.label), "BOMB %.0fs", w.timer);
+                else snprintf(w.label, sizeof(w.label), "BOMB");
+                wtmp.push_back(w);
+            });
+        }
+    }
+
     std::lock_guard<std::mutex> lk(g_mtx);
     g_list.swap(tmp);
+    g_world.swap(wtmp);
 }
 
 static void draw_corner(CGContextRef ctx, CGFloat l, CGFloat t, CGFloat w, CGFloat h, CGFloat len) {
@@ -426,10 +547,18 @@ UIView* g_esp_view(void) { return g_esp; }
                   NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
                   NSForegroundColorAttributeName: UIColor.whiteColor
               }];
-            if (g_espWeapon.load() && p.weapon[0]) {
-                NSString* wpn = [NSString stringWithFormat:@"%s", p.weapon];
-                if (p.ammo >= 0)
-                    wpn = [NSString stringWithFormat:@"%s [%d]", p.weapon, p.ammo];
+            if (g_espWeapon.load() && (p.weapon[0] || p.ammo >= 0)) {
+                NSString* wpn;
+                if (p.weapon[0] && p.ammo >= 0 && p.ammoMax > 0)
+                    wpn = [NSString stringWithFormat:@"%s %d/%d", p.weapon, p.ammo, p.ammoMax];
+                else if (p.weapon[0] && p.ammo >= 0)
+                    wpn = [NSString stringWithFormat:@"%s %d", p.weapon, p.ammo];
+                else if (p.ammo >= 0 && p.ammoMax > 0)
+                    wpn = [NSString stringWithFormat:@"%d/%d", p.ammo, p.ammoMax];
+                else if (p.weapon[0])
+                    wpn = [NSString stringWithFormat:@"%s", p.weapon];
+                else
+                    wpn = [NSString stringWithFormat:@"%d", p.ammo];
                 [wpn drawAtPoint:CGPointMake(left, bot + 2)
                   withAttributes:@{
                       NSFontAttributeName: [UIFont systemFontOfSize:10],
@@ -445,6 +574,32 @@ UIView* g_esp_view(void) { return g_esp; }
                   }];
             }
         }
+    }
+
+    // grenades + bomb
+    std::vector<WorldSnap> world;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        world = g_world;
+    }
+    for (auto& w : world) {
+        Vec3 sc = w2s(cam, w.pos);
+        if (sc.z < 0.05f) continue;
+        CGFloat x = sc.x - 3.f;
+        CGFloat y = H - sc.y - 3.f;
+        if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
+        BOOL isBomb = (strncmp(w.label, "BOMB", 4) == 0);
+        UIColor* col = isBomb
+            ? [UIColor colorWithRed:1 green:0.35 blue:0.1 alpha:1]
+            : [UIColor colorWithRed:1 green:0.85 blue:0.2 alpha:1];
+        CGContextSetFillColorWithColor(ctx, col.CGColor);
+        CGContextFillEllipseInRect(ctx, CGRectMake(x - 5, y - 5, 10, 10));
+        NSString* lab = [NSString stringWithUTF8String:w.label];
+        [lab drawAtPoint:CGPointMake(x + 8, y - 8)
+          withAttributes:@{
+              NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
+              NSForegroundColorAttributeName: col
+          }];
     }
 }
 @end
@@ -474,12 +629,10 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
 
 // Safe recoil: only 3 float multipliers on WeaponParameters, absolute, once.
 // Never touch nested RecoilParameters* (that crashed).
+// Recoil: zero GunController instance floats (runtime), never SO
 static void apply_recoil(void* localPc) {
-    static float lastPct = -999.f;
-    static void* lastP = nullptr;
     float pct = g_recoilPct.load();
-    if (!ok_ptr(localPc)) return;
-    if (pct < 0.5f) return;
+    if (pct < 1.f || !ok_ptr(localPc)) return;
 
     void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
     if (!ok_ptr(wry)) return;
@@ -489,24 +642,20 @@ static void apply_recoil(void* localPc) {
         wc = R<F>(0x162E58C)(wry);
     }
     if (!ok_ptr(wc)) return;
-    void* params = *(void**)((char*)wc + Offsets::WC_weaponParams);
-    if (!ok_ptr(params)) return;
 
-    if (params == lastP && fabsf(pct - lastPct) < 0.5f) return;
-    lastP = params;
-    lastPct = pct;
-
-    float mul = 1.f - pct / 100.f;
-    if (mul < 0.f) mul = 0.f;
-    if (mul > 1.f) mul = 1.f;
-
+    // GunController runtime floats @ 0xD0 / 0xD4 — damp by pct
+    float keep = 1.f - pct / 100.f;
+    if (keep < 0.f) keep = 0.f;
     @try {
-        float* m1 = (float*)((char*)params + Offsets::GP_recoilMultCrouch);
-        float* m2 = (float*)((char*)params + Offsets::GP_recoilAimMult);
-        float* m3 = (float*)((char*)params + Offsets::GP_recoilAimCrouch);
-        if (*m1 == *m1 && *m1 >= 0.f && *m1 < 20.f) *m1 = mul;
-        if (*m2 == *m2 && *m2 >= 0.f && *m2 < 20.f) *m2 = mul;
-        if (*m3 == *m3 && *m3 >= 0.f && *m3 < 20.f) *m3 = mul;
+        float* f0 = (float*)((char*)wc + 0xD0);
+        float* f1 = (float*)((char*)wc + 0xD4);
+        if (*f0 == *f0 && fabsf(*f0) < 50.f) *f0 *= keep;
+        if (*f1 == *f1 && fabsf(*f1) < 50.f) *f1 *= keep;
+        // also zero common recoil progress ints area carefully
+        if (pct >= 90.f) {
+            if (*f0 == *f0) *f0 = 0.f;
+            if (*f1 == *f1) *f1 = 0.f;
+        }
     } @catch (...) {}
 }
 
@@ -532,6 +681,10 @@ static void run_aim(void* cam, void* camTr) {
         if (!ok_ptr(aimCtrl)) return;
 
         void* aimTr = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
+        if (!ok_ptr(aimTr)) {
+            // FPSCamera transform @ 0x70
+            aimTr = *(void**)((char*)aimCtrl + Offsets::AC_FPSCamera);
+        }
         if (!ok_ptr(aimTr)) aimTr = camTr;
 
         CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
@@ -564,6 +717,19 @@ static void run_aim(void* cam, void* camTr) {
                 if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
             }
             Vec3 bone = {base.x, base.y + boneY, base.z};
+
+            // visible check for aim only (Linecast no hitInfo — safer)
+            if (unity_base()) {
+                using LC = bool (*)(Vec3*, Vec3*, int);
+                Vec3 from = cpos;
+                // slight lift so we don't start inside local collider
+                from.y += 0.1f;
+                if (R<LC>(0x336E920)(&from, &bone, ~0)) {
+                    // blocked by something — skip (wall)
+                    // Note: may false-positive on own gun; if aim never locks, comment out
+                    continue;
+                }
+            }
 
             Vec3 sc = w2s(cam, bone);
             if (sc.z < 0.05f) continue;
@@ -598,22 +764,26 @@ static void run_aim(void* cam, void* camTr) {
         if (pitch < -85.f) pitch = -85.f;
         if (pitch >  85.f) pitch =  85.f;
 
-        // Only write if current values look like angles (prevents crash on wrong field)
+        // Write AimController angles (0x164 / 0x168)
         float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
         float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
         float curP = *aPitch, curY = *aYaw;
-        bool pitchOk = (curP == curP) && fabsf(curP) <= 180.f;
-        bool yawOk   = (curY == curY) && fabsf(curY) <= 360.f;
-        if (pitchOk) {
-            if (g_silent.load()) *aPitch = pitch;
-            else *aPitch = curP + (pitch - curP) / sm;
+        if (curP == curP && fabsf(curP) < 360.f) {
+            *aPitch = g_silent.load() ? pitch : (curP + (pitch - curP) / fmaxf(1.f, sm));
         }
-        if (yawOk) {
+        if (curY == curY && fabsf(curY) < 720.f) {
             float dy = yaw - curY;
             while (dy >  180.f) dy -= 360.f;
             while (dy < -180.f) dy += 360.f;
-            if (g_silent.load()) *aYaw = yaw;
-            else *aYaw = curY + dy / sm;
+            *aYaw = g_silent.load() ? yaw : (curY + dy / fmaxf(1.f, sm));
+        }
+
+        // Also set euler on camTransform — makes aim actually move view
+        // silent still sets it so shots follow; game often reads transform for fire
+        if (ok_ptr(aimTr) && unity_base()) {
+            Vec3 up{0, 1, 0};
+            using Look = void (*)(void*, Vec3*, Vec3*);
+            R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
         }
     } @catch (...) {
         g_haveSilent = false;
