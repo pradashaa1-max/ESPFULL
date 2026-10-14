@@ -17,7 +17,7 @@ UIView* Astral_SecureRoot = nil;
 // ─── State ───────────────────────────────────────────────────────────────────
 std::atomic<bool>  g_aimbot{false};
 std::atomic<bool>  g_silent{false};
-std::atomic<bool>  g_fovDraw{false};
+std::atomic<bool>  g_fovDraw{true};
 std::atomic<bool>  g_espBox{false};
 std::atomic<bool>  g_espSkel{false};
 std::atomic<bool>  g_espName{false};
