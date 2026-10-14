@@ -96,16 +96,38 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     UIView* fab = g_fab_ref();
     if (panel && !panel.hidden && panel.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:panel];
-        if (CGRectContainsPoint(panel.bounds, lp)) return YES;
+        if (CGRectContainsPoint(CGRectInset(panel.bounds, -4, -4), lp)) return YES;
     }
     if (fab && !fab.hidden) {
         CGPoint lp = [self convertPoint:point toView:fab];
-        if (CGRectContainsPoint(fab.bounds, lp)) return YES;
+        // larger hit area so FAB is easy to press
+        if (CGRectContainsPoint(CGRectInset(fab.bounds, -12, -12), lp)) return YES;
     }
     return NO;
 }
 - (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
     if (![self pointInside:point withEvent:event]) return nil;
+    extern UIView* g_panel_ref(void);
+    extern UIView* g_fab_ref(void);
+    UIView* panel = g_panel_ref();
+    UIView* fab = g_fab_ref();
+    // Prefer FAB button directly
+    if (fab && !fab.hidden) {
+        CGPoint lp = [self convertPoint:point toView:fab];
+        if (CGRectContainsPoint(CGRectInset(fab.bounds, -12, -12), lp)) {
+            UIView* h = [fab hitTest:lp withEvent:event];
+            if (h) return h;
+            return fab;
+        }
+    }
+    if (panel && !panel.hidden && panel.alpha > 0.05f) {
+        CGPoint lp = [self convertPoint:point toView:panel];
+        if (CGRectContainsPoint(panel.bounds, lp)) {
+            UIView* h = [panel hitTest:lp withEvent:event];
+            if (h) return h;
+            return panel;
+        }
+    }
     return [super hitTest:point withEvent:event];
 }
 - (BOOL)canBecomeKeyWindow { return NO; }
@@ -500,36 +522,63 @@ static void buildPanel(UIView* host) {
     rebuildContent();
 }
 
+@interface FabToggle : NSObject
++ (instancetype)shared;
+- (void)toggle;
+@end
+@implementation FabToggle
++ (instancetype)shared {
+    static FabToggle* s; static dispatch_once_t o;
+    dispatch_once(&o, ^{ s = [FabToggle new]; });
+    return s;
+}
+- (void)toggle {
+    extern UIView* g_panel_ref(void);
+    bool open = !g_menuOpen.load();
+    g_menuOpen = open;
+    UIView* panel = g_panel_ref();
+    if (!panel) return;
+    panel.hidden = NO;
+    [panel.superview bringSubviewToFront:panel];
+    [UIView animateWithDuration:0.2 animations:^{
+        panel.alpha = open ? 1.0 : 0.0;
+        panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.94, 0.94);
+    } completion:^(BOOL f) {
+        if (!open) panel.hidden = YES;
+    }];
+}
+@end
+
 static void buildFab(UIView* host) {
     if (g_fab) return;
-    g_fab = [[UIView alloc] initWithFrame:CGRectMake(16, 16, 44, 44)];
+    // Visible position: top-right in landscape-ish coords
+    CGFloat x = MAX(16, host.bounds.size.width - 70);
+    if (x < 20) x = 20;
+    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 40, 52, 52)];
     g_fab.backgroundColor = Accent();
-    g_fab.layer.cornerRadius = 22;
+    g_fab.layer.cornerRadius = 26;
     g_fab.layer.shadowColor = Accent().CGColor;
-    g_fab.layer.shadowOpacity = 0.5;
-    g_fab.layer.shadowRadius = 8;
+    g_fab.layer.shadowOpacity = 0.55;
+    g_fab.layer.shadowRadius = 10;
+    g_fab.userInteractionEnabled = YES;
     UILabel* star = [[UILabel alloc] initWithFrame:g_fab.bounds];
     star.text = @"✦";
     star.textAlignment = NSTextAlignmentCenter;
-    star.font = [UIFont systemFontOfSize:20];
+    star.font = [UIFont systemFontOfSize:24];
     star.textColor = UIColor.whiteColor;
+    star.userInteractionEnabled = NO;
     [g_fab addSubview:star];
-    UITapGestureRecognizer* tap = [[UITapGestureRecognizer alloc] initWithTarget:nil action:nil];
-    // toggle via UIButton instead
     UIButton* btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = g_fab.bounds;
-    [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction* a) {
-        bool open = !g_menuOpen.load();
-        g_menuOpen = open;
-        [UIView animateWithDuration:0.22 animations:^{
-            g_panel.alpha = open ? 1 : 0;
-            g_panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.92, 0.92);
-        } completion:^(BOOL f){ g_panel.hidden = !open; }];
-        if (open) g_panel.hidden = NO;
-    }] forControlEvents:UIControlEventTouchUpInside];
+    btn.accessibilityLabel = @"AstralMenu";
+    [btn addTarget:[FabToggle shared] action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
-    [AstralDrag attach:g_fab];
+    // Drag only after movement — don't kill taps
+    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:[AstralDrag class] action:@selector(onPan:)];
+    pan.maximumNumberOfTouches = 1;
+    pan.cancelsTouchesInView = NO;
+    [g_fab addGestureRecognizer:pan];
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
