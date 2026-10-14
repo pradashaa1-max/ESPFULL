@@ -1,4 +1,4 @@
-// Features.mm — ESP / Aim / NoRecoil (compile-clean)
+// Features.mm — ESP (bones) / Aim (angles) / Recoil strength 0-100
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
@@ -19,7 +19,6 @@ struct Vec4 { float x, y, z, w; };
 
 static inline float vlen(Vec3 v) { return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z); }
 static inline Vec3  vsub(Vec3 a, Vec3 b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
-static inline Vec3  vadd(Vec3 a, Vec3 b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
 static inline Vec3  vmul(Vec3 v, float s) { return {v.x*s, v.y*s, v.z*s}; }
 static inline float vdot(Vec3 a, Vec3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
 static inline Vec3  vnorm(Vec3 v) {
@@ -73,56 +72,55 @@ static void* pc_tr(void* pc) {
     if (t && alive(t)) return t;
     return get_tr(pc);
 }
+
+// WorldToScreen — MonoOrStereoscopicEye.Mono = 0 (not 2)
+// Unity returns screen coords in pixels; UIKit uses points → divide by scale
 static Vec3 w2s(void* cam, Vec3 w) {
     Vec3 o{};
     if (!cam || !unity_base()) return o;
     using F = void (*)(void*, Vec3*, int, Vec3*);
-    R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
+    R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 0, &o);
+    float scale = (float)UIScreen.mainScreen.scale;
+    if (scale > 1.01f) {
+        o.x /= scale;
+        o.y /= scale;
+    }
     return o;
 }
-static void set_rot(void* tr, Vec4 q) {
-    if (!tr || !unity_base()) return;
-    using F = void (*)(void*, Vec4*);
-    R<F>(0x3323EAC)(tr, &q);
-}
-static void look_at(void* tr, Vec3 world) {
-    if (!tr || !unity_base()) return;
-    Vec3 up{0, 1, 0};
-    using F = void (*)(void*, Vec3*, Vec3*);
-    R<F>(Offsets::Transform_Internal_LookAt_Inj)(tr, &world, &up);
-}
 
-static Vec4 quat_from_dir(Vec3 f) {
-    f = vnorm(f);
-    Vec3 up{0, 1, 0};
-    if (fabsf(vdot(f, up)) > 0.99f) up = {1, 0, 0};
-    Vec3 r = vnorm({up.y*f.z - up.z*f.y, up.z*f.x - up.x*f.z, up.x*f.y - up.y*f.x});
-    Vec3 u = {f.y*r.z - f.z*r.y, f.z*r.x - f.x*r.z, f.x*r.y - f.y*r.x};
-    float t = r.x + u.y + f.z;
-    Vec4 q{};
-    if (t > 0) {
-        float s = 0.5f / sqrtf(t + 1.f);
-        q.w = 0.25f / s; q.x = (u.z - f.y)*s; q.y = (f.x - r.z)*s; q.z = (r.y - u.x)*s;
-    } else if (r.x > u.y && r.x > f.z) {
-        float s = 2.f * sqrtf(1.f + r.x - u.y - f.z);
-        q.w = (u.z - f.y)/s; q.x = 0.25f*s; q.y = (u.x + r.y)/s; q.z = (f.x + r.z)/s;
-    } else if (u.y > f.z) {
-        float s = 2.f * sqrtf(1.f + u.y - r.x - f.z);
-        q.w = (f.x - r.z)/s; q.x = (u.x + r.y)/s; q.y = 0.25f*s; q.z = (f.y + u.z)/s;
-    } else {
-        float s = 2.f * sqrtf(1.f + f.z - r.x - u.y);
-        q.w = (r.y - u.x)/s; q.x = (f.x + r.z)/s; q.y = (f.y + u.z)/s; q.z = 0.25f*s;
-    }
-    return q;
+// BipedMap on PlayerController: _characterBiped @ 0x30, also 0xA8
+// BipedMap.Head @ 0x18, Neck 0x20, Spine1 0x28, Spine2 0x30, Hip 0x78
+static void* biped_of(void* pc) {
+    if (!pc) return nullptr;
+    void* b = *(void**)((char*)pc + 0x30); // _characterBiped
+    if (alive(b)) return b;
+    b = *(void**)((char*)pc + 0xA8);
+    return alive(b) ? b : nullptr;
+}
+static void* bone_tr(void* biped, size_t off) {
+    if (!alive(biped)) return nullptr;
+    void* t = *(void**)((char*)biped + off);
+    return alive(t) ? t : nullptr;
+}
+static Vec3 bone_pos(void* biped, size_t off, Vec3 fallback) {
+    void* t = bone_tr(biped, off);
+    if (!t) return fallback;
+    Vec3 p = get_pos(t);
+    if (p.x != p.x) return fallback;
+    return p;
 }
 
 struct PSnap {
     void* obj;
     void* tr;
-    Vec3 pos;
-    int team;
-    bool local;
-    char name[32];
+    void* biped;
+    Vec3  pos;   // hip / root
+    Vec3  head;
+    Vec3  neck;
+    Vec3  chest;
+    int   team;
+    bool  local;
+    char  name[32];
 };
 static std::mutex g_mtx;
 static std::vector<PSnap> g_list;
@@ -214,13 +212,24 @@ static void refresh(void* camTr) {
     for (void* pc : raw) {
         void* tr = pc_tr(pc);
         if (!tr || !alive(tr)) continue;
-        Vec3 p = get_pos(tr);
-        if (p.x != p.x) continue;
+        Vec3 root = get_pos(tr);
+        if (root.x != root.x) continue;
+
+        void* biped = biped_of(pc);
+        Vec3 head  = bone_pos(biped, 0x18, {root.x, root.y + 1.70f, root.z});
+        Vec3 neck  = bone_pos(biped, 0x20, {root.x, root.y + 1.45f, root.z});
+        Vec3 chest = bone_pos(biped, 0x28, {root.x, root.y + 1.15f, root.z});
+        Vec3 hip   = bone_pos(biped, 0x78, root);
+
         PSnap s{};
-        s.obj = pc;
-        s.tr = tr;
-        s.pos = p;
-        s.team = team_of(pc);
+        s.obj   = pc;
+        s.tr    = tr;
+        s.biped = biped;
+        s.pos   = hip;
+        s.head  = head;
+        s.neck  = neck;
+        s.chest = chest;
+        s.team  = team_of(pc);
         s.local = is_mine(pc);
         s.name[0] = 0;
         void* pp = *(void**)((char*)pc + Offsets::PC_photonPlayer);
@@ -280,21 +289,23 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-        Vec3 feet = p.pos;
-        Vec3 head = {p.pos.x, p.pos.y + 1.7f, p.pos.z};
-        Vec3 sf = w2s(cam, feet);
-        Vec3 sh = w2s(cam, head);
+        Vec3 sf = w2s(cam, p.pos);
+        Vec3 sh = w2s(cam, p.head);
+        // behind camera
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
+        // Unity screen Y is bottom-up → flip for UIKit
         CGFloat fy = H - sf.y, hy = H - sh.y;
         CGFloat fx = sf.x, hx = sh.x;
-        if ((fx < -200 && hx < -200) || (fx > W + 200 && hx > W + 200)) continue;
+        if ((fx < -80 && hx < -80) || (fx > W + 80 && hx > W + 80)) continue;
+        if ((fy < -80 && hy < -80) || (fy > H + 80 && hy > H + 80)) continue;
 
-        CGFloat top = fminf(fy, hy), bot = fmaxf(fy, hy);
+        CGFloat top = fminf(fy, hy);
+        CGFloat bot = fmaxf(fy, hy);
         CGFloat hgt = bot - top;
-        if (hgt < 8.f) hgt = 50.f;
+        if (hgt < 12.f) hgt = 40.f;
         CGFloat mid = (fx + hx) * 0.5f;
-        CGFloat wid = hgt * 0.5f;
+        CGFloat wid = hgt * 0.42f;
         CGFloat left = mid - wid * 0.5f;
 
         UIColor* col = [UIColor colorWithRed:0.15 green:0.55 blue:1 alpha:1];
@@ -305,9 +316,14 @@ UIView* g_esp_view(void) { return g_esp; }
             CGContextStrokeRect(ctx, CGRectMake(left, top, wid, hgt));
         }
         if (skel) {
+            Vec3 sn = w2s(cam, p.neck);
+            Vec3 sc = w2s(cam, p.chest);
+            CGFloat ny = H - sn.y, cy = H - sc.y;
             CGContextSetStrokeColorWithColor(ctx, col.CGColor);
-            CGContextSetLineWidth(ctx, 1.2);
+            CGContextSetLineWidth(ctx, 1.3);
             CGContextMoveToPoint(ctx, hx, hy);
+            CGContextAddLineToPoint(ctx, sn.x, ny);
+            CGContextAddLineToPoint(ctx, sc.x, cy);
             CGContextAddLineToPoint(ctx, fx, fy);
             CGContextStrokePath(ctx);
             CGContextFillEllipseInRect(ctx, CGRectMake(hx - 3, hy - 3, 6, 6));
@@ -318,7 +334,7 @@ UIView* g_esp_view(void) { return g_esp; }
                 float d = vdist(p.pos, cpos);
                 [lab appendFormat:@" %.0fm", d];
             }
-            [lab drawAtPoint:CGPointMake(left, top - 12)
+            [lab drawAtPoint:CGPointMake(left, top - 14)
               withAttributes:@{
                   NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
                   NSForegroundColorAttributeName: [UIColor whiteColor]
@@ -351,43 +367,45 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
     }
 }
 
-static void apply_norecoil(void* localPc) {
-    if (!g_noRecoil.load() || !alive(localPc)) return;
-    // PlayerController → WeaponryController → WeaponController → WeaponParameters (GunParameters)
+// recoilPct 0 = full recoil, 100 = zero recoil
+static void apply_recoil(void* localPc) {
+    if (!alive(localPc)) return;
+    float pct = g_recoilPct.load(); // 0..100
+    if (pct < 0.5f) return; // no change
+
     void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
     if (!alive(wry)) return;
     void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
     if (!alive(wc) && unity_base()) {
         using F = void* (*)(void*);
-        wc = R<F>(0x162E58C)(wry); // get_ADFFFAGDHFAHEBE
+        wc = R<F>(0x162E58C)(wry);
     }
     if (!alive(wc)) return;
 
-    // WeaponController.WeaponParameters @ 0x68 (GunParameters when gun)
-    void* params = *(void**)((char*)wc + 0x68);
+    void* params = *(void**)((char*)wc + Offsets::WC_weaponParams);
     if (!alive(params)) return;
 
-    auto zf = [](void* b, size_t o) {
+    float mul = 1.f - (pct / 100.f); // 100% → 0, 0% → 1
+    if (mul < 0.f) mul = 0.f;
+
+    auto scale = [&](void* b, size_t o) {
         float* p = (float*)((char*)b + o);
-        if (*p == *p && fabsf(*p) < 500.f) *p = 0.f;
+        if (*p == *p && fabsf(*p) < 500.f) *p = (*p) * mul;
     };
-    // GunParameters recoil multipliers
-    zf(params, 0xD0); // _recoilMultOnCrouch
-    zf(params, 0xD8); // _recoilAimMult
-    zf(params, 0xE0); // _recoilAimMultOnCrouch
+    // only scale the multipliers (safe every frame)
+    scale(params, Offsets::GP_recoilMultCrouch);
+    scale(params, Offsets::GP_recoilAimMult);
+    scale(params, Offsets::GP_recoilAimCrouch);
 
-    // _recoilControl → max
-    int* rc = (int*)((char*)params + 0xA8);
-    if (*rc >= 0 && *rc < 10000) *rc = 100;
-
-    // RecoilParameters object @ 0xB0 — zero angular ranges + camera deviation
-    void* rp = *(void**)((char*)params + 0xB0);
-    if (alive(rp)) {
-        zf(rp, 0x10); // horizontalRange
-        zf(rp, 0x14); // verticalRange
-        zf(rp, 0x48); // cameraDeviationCoeff
-        zf(rp, 0x50); // recoilAccelDuration
-        zf(rp, 0x54); // recoilAccelStep
+    if (pct >= 99.f) {
+        int* rc = (int*)((char*)params + Offsets::GP_recoilControl);
+        if (*rc >= 0 && *rc < 10000) *rc = 100;
+        void* rp = *(void**)((char*)params + Offsets::GP_recoilParams);
+        if (alive(rp)) {
+            scale(rp, Offsets::RP_horiz);
+            scale(rp, Offsets::RP_vert);
+            scale(rp, Offsets::RP_camDev);
+        }
     }
 }
 
@@ -400,53 +418,57 @@ static void run_aim(void* cam, void* camTr) {
         for (auto& s : snap) if (s.local) localPc = s.obj;
     }
 
-    apply_norecoil(localPc);
+    apply_recoil(localPc);
 
     if (!g_aimbot.load()) return;
     if (!alive(cam) || !alive(camTr)) return;
 
-    void* aimTr = camTr;
     void* aimCtrl = nullptr;
     if (alive(localPc)) {
         aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
-        if (alive(aimCtrl)) {
-            void* ct = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
-            if (alive(ct)) aimTr = ct;
-        }
     }
+    if (!alive(aimCtrl)) return;
+
+    // aim from camTransform of AimController
+    void* aimTr = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
+    if (!alive(aimTr)) aimTr = camTr;
 
     CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
     float cx = scr.width * 0.5f, cy = scr.height * 0.5f;
-    float fovR = fminf(scr.width, scr.height) * 0.45f;
-    if (g_fovDraw.load())
-        fovR = fminf(scr.width, scr.height) * (0.05f + g_fov.load() / 30.f * 0.25f);
+    float side = fminf(scr.width, scr.height);
+    float fovR = side * (0.05f + g_fov.load() / 30.f * 0.25f);
 
-    Vec3 best{};
-    bool have = false;
-    float bestScore = 1e9f;
     Vec3 cpos = get_pos(aimTr);
     int localTeam = -1;
     for (auto& s : snap) if (s.local) localTeam = s.team;
 
-    // bone height: 0 head 1 neck 2 chest
-    float boneY = 1.65f;
-    switch (g_bone.load()) {
-        case 1: boneY = 1.45f; break;
-        case 2: boneY = 1.15f; break;
-        default: boneY = 1.65f; break;
-    }
+    Vec3 best{};
+    bool have = false;
+    float bestScore = 1e9f;
 
     for (auto& p : snap) {
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
-        Vec3 bone = {p.pos.x, p.pos.y + boneY, p.pos.z};
+
+        Vec3 bone = p.head;
+        switch (g_bone.load()) {
+            case 1: bone = p.neck;  break;
+            case 2: bone = p.chest; break;
+            default: bone = p.head; break;
+        }
+
         Vec3 sc = w2s(cam, bone);
-        if (sc.z < 0.02f) continue;
-        float sx = sc.x, sy = scr.height - sc.y;
+        if (sc.z < 0.05f) continue;
+        float sx = sc.x;
+        float sy = scr.height - sc.y;
         float dx = sx - cx, dy = sy - cy;
         float d2 = sqrtf(dx * dx + dy * dy);
         if (d2 > fovR) continue;
-        if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
+        if (d2 < bestScore) {
+            bestScore = d2;
+            best = bone;
+            have = true;
+        }
     }
     if (!have) return;
 
@@ -459,22 +481,15 @@ static void run_aim(void* cam, void* camTr) {
     smT.z += (best.z - smT.z) / sm;
 
     Vec3 dir = vnorm(vsub(smT, cpos));
-    float yaw = atan2f(dir.x, dir.z) * 57.2957795f;
+    // Unity FPS: pitch = X rotation, yaw = Y rotation
+    float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
     float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
 
-    look_at(aimTr, smT);
-    set_rot(aimTr, quat_from_dir(dir));
-
-    if (alive(aimCtrl)) {
-        float* a0 = (float*)((char*)aimCtrl + 0x164);
-        float* a1 = (float*)((char*)aimCtrl + 0x168);
-        if (*a0 == *a0 && fabsf(*a0) < 360.f) *a0 = pitch;
-        if (*a1 == *a1 && fabsf(*a1) < 360.f) *a1 = yaw;
-    }
-    if (aimTr != camTr) {
-        look_at(camTr, smT);
-        set_rot(camTr, quat_from_dir(dir));
-    }
+    // write only into AimController angles — do NOT fight with LookAt/set_rotation
+    float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
+    float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
+    if (*aPitch == *aPitch && fabsf(*aPitch) < 360.f) *aPitch = pitch;
+    if (*aYaw   == *aYaw   && fabsf(*aYaw)   < 360.f) *aYaw   = yaw;
 }
 
 void Astral_FeaturesTick() {
@@ -490,7 +505,7 @@ void Astral_FeaturesTick() {
     }
 
     bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load();
-    bool wantAim = g_aimbot.load() || g_noRecoil.load();
+    bool wantAim = g_aimbot.load() || g_recoilPct.load() > 0.5f;
     bool wantFov = g_fovDraw.load();
     if (!wantEsp && !wantAim && !wantFov) return;
     if (!unity_base()) return;
@@ -506,7 +521,7 @@ void Astral_FeaturesTick() {
             std::lock_guard<std::mutex> lk(g_mtx);
             n = g_list.size();
         }
-        if (n == 0 || ++g_ctr >= 10) {
+        if (n == 0 || ++g_ctr >= 8) {
             g_ctr = 0;
             refresh(camTr);
         }

@@ -26,6 +26,7 @@ std::atomic<bool>  g_espWeapon{false};
 std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
+std::atomic<float> g_recoilPct{0.f};      // 0=full, 100=zero
 std::atomic<bool>  g_hideRec{true};       // ON at launch
 std::atomic<bool>  g_menuOpen{false};
 std::atomic<float> g_fov{15.f};
@@ -48,6 +49,7 @@ void Astral_SaveConfig(void) {
     [d setBool:g_espDist.load()  forKey:@"astral_espDist"];
     [d setBool:g_espTeam.load()  forKey:@"astral_espTeam"];
     [d setBool:g_noRecoil.load() forKey:@"astral_noRecoil"];
+    [d setFloat:g_recoilPct.load() forKey:@"astral_recoilPct"];
     [d setBool:g_hideRec.load()  forKey:@"astral_hideRec"];
     [d setFloat:g_fov.load()     forKey:@"astral_fov"];
     [d setFloat:g_smooth.load()  forKey:@"astral_smooth"];
@@ -71,6 +73,9 @@ void Astral_LoadConfig(void) {
     g_espDist.store([d boolForKey:@"astral_espDist"]);
     g_espTeam.store([d boolForKey:@"astral_espTeam"]);
     g_noRecoil.store([d boolForKey:@"astral_noRecoil"]);
+    float rp = [d floatForKey:@"astral_recoilPct"];
+    if (rp >= 0.f && rp <= 100.f) g_recoilPct.store(rp);
+    else if (g_noRecoil.load()) g_recoilPct.store(100.f);
     g_hideRec.store([d boolForKey:@"astral_hideRec"]);
     float f = [d floatForKey:@"astral_fov"];
     if (f > 0.5f && f < 40.f) g_fov.store(f);
@@ -465,9 +470,12 @@ static void rebuildContent() {
                        g_espTeam.load(), ^(bool v){ g_espTeam=v; Astral_SaveConfig(); }));
     }
     else if (g_section == 2) { // Misc
-        add(makeSwitch(L("No Recoil","Без отдачи"),
-                       L("Reduce weapon recoil","Убрать отдачу"),
-                       g_noRecoil.load(), ^(bool v){ g_noRecoil=v; Astral_SaveConfig(); }));
+        add(makeSlider(L("Recoil %","Отдача %"),
+                       g_recoilPct.load(), 0, 100, ^(float v){
+                           g_recoilPct=v;
+                           g_noRecoil.store(v >= 99.f);
+                           Astral_SaveConfig();
+                       }));
         add(makeSwitch(L("Hide from recording","Скрытие записи"),
                        L("Hide menu & ESP on screenshots/record","Скрыть меню и ESP на скринах"),
                        g_hideRec.load(), ^(bool v){
