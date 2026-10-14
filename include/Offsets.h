@@ -25,7 +25,28 @@ constexpr size_t PC_aimController  = 0x60;
 constexpr size_t PC_weaponry       = 0x68;
 constexpr size_t PC_hitController  = 0x88;
 constexpr size_t PC_transform      = 0xD8;  // CBCBGACGGECGEAA
+constexpr size_t PC_photonView     = 0x120;
 constexpr size_t PC_photonPlayer   = 0x130;
+
+// AimController
+constexpr size_t AC_FPSCamera      = 0x70;
+constexpr size_t AC_camTransform   = 0x80;
+
+// WeaponController recoil
+constexpr size_t WC_recoilControl  = 0xA8;
+constexpr size_t WC_recoilParams   = 0xB0;
+constexpr size_t WC_recoilMultCrouch = 0xD0;
+constexpr size_t WC_recoilAimMult  = 0xD8;
+constexpr size_t WC_recoilAimCrouch = 0xE0;
+
+// RecoilParameters
+constexpr size_t RP_horiz          = 0x10;
+constexpr size_t RP_vert           = 0x14;
+constexpr size_t RP_camDev         = 0x48;
+
+// PhotonView.get_isMine
+constexpr uint64_t PhotonView_get_isMine = 0x149F1DC;
+
 
 // PhotonPlayer
 constexpr size_t PP_nameField      = 0x18;
