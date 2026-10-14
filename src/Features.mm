@@ -45,8 +45,11 @@ template<typename Fn>
 static Fn R(uint64_t o) { return (Fn)(unity_base() + o); }
 
 static bool alive(void* o) {
-    if (!o || ((uintptr_t)o & 7) != 0) return false;
-    return *(void**)((char*)o + 0x10) != nullptr;
+    if (!o) return false;
+    uintptr_t a = (uintptr_t)o;
+    // reject obvious junk / misaligned
+    if (a < 0x10000 || (a & 0x3) != 0) return false;
+    return true;
 }
 
 static Vec3 get_pos(void* tr) {
@@ -73,41 +76,43 @@ static void* pc_tr(void* pc) {
     return get_tr(pc);
 }
 
-// WorldToScreen — MonoOrStereoscopicEye.Mono = 0 (not 2)
-// Unity returns screen coords in pixels; UIKit uses points → divide by scale
+// WorldToScreen — on iOS Unity already returns UIKit points (not raw pixels)
 static Vec3 w2s(void* cam, Vec3 w) {
     Vec3 o{};
     if (!cam || !unity_base()) return o;
     using F = void (*)(void*, Vec3*, int, Vec3*);
+    // MonoOrStereoscopicEye.Mono = 0
     R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 0, &o);
-    float scale = (float)UIScreen.mainScreen.scale;
-    if (scale > 1.01f) {
-        o.x /= scale;
-        o.y /= scale;
-    }
     return o;
 }
 
 // BipedMap on PlayerController: _characterBiped @ 0x30, also 0xA8
-// BipedMap.Head @ 0x18, Neck 0x20, Spine1 0x28, Spine2 0x30, Hip 0x78
+// BipedMap.Head @ 0x18, Neck 0x20, Spine1 0x28, Hip 0x78
 static void* biped_of(void* pc) {
-    if (!pc) return nullptr;
-    void* b = *(void**)((char*)pc + 0x30); // _characterBiped
-    if (alive(b)) return b;
-    b = *(void**)((char*)pc + 0xA8);
-    return alive(b) ? b : nullptr;
-}
-static void* bone_tr(void* biped, size_t off) {
-    if (!alive(biped)) return nullptr;
-    void* t = *(void**)((char*)biped + off);
-    return alive(t) ? t : nullptr;
+    if (!alive(pc)) return nullptr;
+    void* b = nullptr;
+    @try {
+        b = *(void**)((char*)pc + 0x30);
+        if (alive(b)) return b;
+        b = *(void**)((char*)pc + 0xA8);
+        if (alive(b)) return b;
+    } @catch (...) {}
+    return nullptr;
 }
 static Vec3 bone_pos(void* biped, size_t off, Vec3 fallback) {
-    void* t = bone_tr(biped, off);
-    if (!t) return fallback;
-    Vec3 p = get_pos(t);
-    if (p.x != p.x) return fallback;
-    return p;
+    if (!alive(biped)) return fallback;
+    @try {
+        void* t = *(void**)((char*)biped + off);
+        if (!alive(t)) return fallback;
+        Vec3 p = get_pos(t);
+        if (p.x != p.x || fabsf(p.x) > 1e5f || fabsf(p.y) > 1e5f) return fallback;
+        // reject if bone is absurdly far from root fallback
+        float dx = p.x - fallback.x, dy = p.y - fallback.y, dz = p.z - fallback.z;
+        if (dx*dx + dy*dy + dz*dz > 25.f) return fallback; // >5m from root → junk
+        return p;
+    } @catch (...) {
+        return fallback;
+    }
 }
 
 struct PSnap {
@@ -194,10 +199,14 @@ static std::vector<void*> collect_players() {
 
 static bool is_mine(void* pc) {
     if (!pc || !unity_base()) return false;
-    void* pv = *(void**)((char*)pc + Offsets::PC_photonView);
-    if (!alive(pv)) return false;
-    using F = bool (*)(void*);
-    return R<F>(Offsets::PhotonView_get_isMine)(pv);
+    @try {
+        void* pv = *(void**)((char*)pc + Offsets::PC_photonView);
+        if (!alive(pv)) return false;
+        using F = bool (*)(void*);
+        return R<F>(Offsets::PhotonView_get_isMine)(pv);
+    } @catch (...) {
+        return false;
+    }
 }
 
 static void refresh(void* camTr) {
@@ -208,17 +217,22 @@ static void refresh(void* camTr) {
         return;
     }
     auto raw = collect_players();
+    Vec3 cpos = get_pos(camTr);
+
+    int mineCount = 0;
+    float bestD = 1e9f;
+    size_t bestIdx = 0;
 
     for (void* pc : raw) {
         void* tr = pc_tr(pc);
         if (!tr || !alive(tr)) continue;
         Vec3 root = get_pos(tr);
-        if (root.x != root.x) continue;
+        if (root.x != root.x || fabsf(root.x) > 1e5f) continue;
 
         void* biped = biped_of(pc);
-        Vec3 head  = bone_pos(biped, 0x18, {root.x, root.y + 1.70f, root.z});
-        Vec3 neck  = bone_pos(biped, 0x20, {root.x, root.y + 1.45f, root.z});
-        Vec3 chest = bone_pos(biped, 0x28, {root.x, root.y + 1.15f, root.z});
+        Vec3 head  = bone_pos(biped, 0x18, {root.x, root.y + 1.65f, root.z});
+        Vec3 neck  = bone_pos(biped, 0x20, {root.x, root.y + 1.40f, root.z});
+        Vec3 chest = bone_pos(biped, 0x28, {root.x, root.y + 1.10f, root.z});
         Vec3 hip   = bone_pos(biped, 0x78, root);
 
         PSnap s{};
@@ -231,14 +245,23 @@ static void refresh(void* camTr) {
         s.chest = chest;
         s.team  = team_of(pc);
         s.local = is_mine(pc);
+        if (s.local) mineCount++;
+        float d = vdist(root, cpos);
+        if (d < bestD) { bestD = d; bestIdx = tmp.size(); }
         s.name[0] = 0;
-        void* pp = *(void**)((char*)pc + Offsets::PC_photonPlayer);
-        if (alive(pp)) {
-            void* ns = *(void**)((char*)pp + Offsets::PP_nameField);
-            if (ns) read_str(ns, s.name, sizeof(s.name));
-        }
+        @try {
+            void* pp = *(void**)((char*)pc + Offsets::PC_photonPlayer);
+            if (alive(pp)) {
+                void* ns = *(void**)((char*)pp + Offsets::PP_nameField);
+                if (ns) read_str(ns, s.name, sizeof(s.name));
+            }
+        } @catch (...) {}
         if (!s.name[0]) snprintf(s.name, sizeof(s.name), "P");
         tmp.push_back(s);
+    }
+    // if isMine found nobody, mark closest as local (deathcam / edge cases)
+    if (mineCount == 0 && !tmp.empty() && bestD < 4.f) {
+        tmp[bestIdx].local = true;
     }
     std::lock_guard<std::mutex> lk(g_mtx);
     g_list.swap(tmp);
@@ -368,10 +391,11 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
 }
 
 // recoilPct 0 = full recoil, 100 = zero recoil
+// set absolute multipliers (never compound)
 static void apply_recoil(void* localPc) {
     if (!alive(localPc)) return;
-    float pct = g_recoilPct.load(); // 0..100
-    if (pct < 0.5f) return; // no change
+    float pct = g_recoilPct.load();
+    if (pct < 0.5f) return;
 
     void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
     if (!alive(wry)) return;
@@ -385,26 +409,26 @@ static void apply_recoil(void* localPc) {
     void* params = *(void**)((char*)wc + Offsets::WC_weaponParams);
     if (!alive(params)) return;
 
-    float mul = 1.f - (pct / 100.f); // 100% → 0, 0% → 1
+    float mul = 1.f - (pct / 100.f);
     if (mul < 0.f) mul = 0.f;
 
-    auto scale = [&](void* b, size_t o) {
+    auto setf = [&](void* b, size_t o, float v) {
         float* p = (float*)((char*)b + o);
-        if (*p == *p && fabsf(*p) < 500.f) *p = (*p) * mul;
+        if (*p == *p && fabsf(*p) < 500.f) *p = v;
     };
-    // only scale the multipliers (safe every frame)
-    scale(params, Offsets::GP_recoilMultCrouch);
-    scale(params, Offsets::GP_recoilAimMult);
-    scale(params, Offsets::GP_recoilAimCrouch);
+    // GunParameters multipliers → absolute
+    setf(params, Offsets::GP_recoilMultCrouch, mul);
+    setf(params, Offsets::GP_recoilAimMult,    mul);
+    setf(params, Offsets::GP_recoilAimCrouch,  mul);
 
-    if (pct >= 99.f) {
+    if (pct >= 95.f) {
         int* rc = (int*)((char*)params + Offsets::GP_recoilControl);
         if (*rc >= 0 && *rc < 10000) *rc = 100;
         void* rp = *(void**)((char*)params + Offsets::GP_recoilParams);
         if (alive(rp)) {
-            scale(rp, Offsets::RP_horiz);
-            scale(rp, Offsets::RP_vert);
-            scale(rp, Offsets::RP_camDev);
+            setf(rp, Offsets::RP_horiz,  0.f);
+            setf(rp, Offsets::RP_vert,   0.f);
+            setf(rp, Offsets::RP_camDev, 0.f);
         }
     }
 }
@@ -485,46 +509,52 @@ static void run_aim(void* cam, void* camTr) {
     float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
     float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
 
-    // write only into AimController angles — do NOT fight with LookAt/set_rotation
-    float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
-    float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
-    if (*aPitch == *aPitch && fabsf(*aPitch) < 360.f) *aPitch = pitch;
-    if (*aYaw   == *aYaw   && fabsf(*aYaw)   < 360.f) *aYaw   = yaw;
+    // write only into AimController angles — clamp to sane range
+    @try {
+        float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
+        float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
+        if (pitch < -89.f) pitch = -89.f;
+        if (pitch >  89.f) pitch =  89.f;
+        if (*aPitch == *aPitch && fabsf(*aPitch) < 360.f) *aPitch = pitch;
+        if (*aYaw   == *aYaw   && fabsf(*aYaw)   < 500.f) *aYaw   = yaw;
+    } @catch (...) {}
 }
 
 void Astral_FeaturesTick() {
-    if (g_esp) {
-        UIView* root = g_esp.superview;
-        if (root) {
-            CGRect b = root.bounds;
-            if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
-            b.origin = CGPointZero;
-            g_esp.frame = b;
+    @try {
+        if (g_esp) {
+            UIView* root = g_esp.superview;
+            if (root) {
+                CGRect b = root.bounds;
+                if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
+                b.origin = CGPointZero;
+                g_esp.frame = b;
+            }
+            [g_esp setNeedsDisplay];
         }
-        [g_esp setNeedsDisplay];
-    }
 
-    bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load();
-    bool wantAim = g_aimbot.load() || g_recoilPct.load() > 0.5f;
-    bool wantFov = g_fovDraw.load();
-    if (!wantEsp && !wantAim && !wantFov) return;
-    if (!unity_base()) return;
+        bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load();
+        bool wantAim = g_aimbot.load() || g_recoilPct.load() > 0.5f;
+        bool wantFov = g_fovDraw.load();
+        if (!wantEsp && !wantAim && !wantFov) return;
+        if (!unity_base()) return;
 
-    void* cam = main_cam();
-    if (!alive(cam)) return;
-    void* camTr = get_tr(cam);
-    if (!alive(camTr)) return;
+        void* cam = main_cam();
+        if (!alive(cam)) return;
+        void* camTr = get_tr(cam);
+        if (!alive(camTr)) return;
 
-    if (wantEsp || wantAim) {
-        size_t n = 0;
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            n = g_list.size();
+        if (wantEsp || wantAim) {
+            size_t n = 0;
+            {
+                std::lock_guard<std::mutex> lk(g_mtx);
+                n = g_list.size();
+            }
+            if (n == 0 || ++g_ctr >= 8) {
+                g_ctr = 0;
+                refresh(camTr);
+            }
         }
-        if (n == 0 || ++g_ctr >= 8) {
-            g_ctr = 0;
-            refresh(camTr);
-        }
-    }
-    if (wantAim) run_aim(cam, camTr);
+        if (wantAim) run_aim(cam, camTr);
+    } @catch (...) {}
 }
