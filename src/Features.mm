@@ -210,6 +210,32 @@ static std::vector<void*> find_players_raw() {
         void* obj = arr->vector[i];
         if (obj) out.push_back(obj);
     }
+    if (!out.empty()) return out;
+
+    // Fallback: PlayerManager instance hashset @ +0x28
+    Il2CppClass* pmKlass = api.find_class("Axlebolt.Standoff.Player", "PlayerManager");
+    if (!pmKlass) pmKlass = api.find_class("", "PlayerManager");
+    if (pmKlass) {
+        // try static Instance / get_Instance
+        const MethodInfo* getInst = api.find_method(pmKlass, "get_Instance", 0);
+        if (!getInst) getInst = api.find_method(pmKlass, "get_instance", 0);
+        if (getInst && api.runtime_invoke) {
+            void* exc = nullptr;
+            Il2CppObject* inst = api.runtime_invoke(getInst, nullptr, nullptr, &exc);
+            if (!exc && inst) {
+                void* hs = *(void**)((char*)inst + 0x28); // HashSet field
+                // HashSet layout: Object + count-related; last-resort scan pointers in range
+                if (hs) {
+                    // _slots / _entries vary; soft scan nearby object pointers
+                    for (size_t off = 0x10; off < 0x40; off += sizeof(void*)) {
+                        void* maybe = *(void**)((char*)hs + off);
+                        (void)maybe;
+                    }
+                }
+                // also try dict at 0x20 values via FindObjects already primary
+            }
+        }
+    }
     return out;
 }
 
@@ -499,33 +525,31 @@ static ESPView* g_espView = nil;
 
 void Astral_EnsureFOVOverlay(UIWindow* win) {
     if (!win) return;
-    UIView* root = win.rootViewController.view ?: win;
-    // FORCE full-window frame in root space — origin always (0,0)
-    CGRect b = root.bounds;
-    if (b.size.width < 2 || b.size.height < 2) {
-        b = win.bounds;
-    }
+    UIView* hostRoot = win.rootViewController.view ?: (UIView*)win;
+    // Prefer secure container so ESP is excluded from screenshots/recording
+    UIView* root = Astral_SecureRoot ?: hostRoot;
+    CGRect b = hostRoot.bounds;
+    if (b.size.width < 2) b = win.bounds;
     b.origin = CGPointZero;
 
     if (!g_espView) {
         g_espView = [[ESPView alloc] initWithFrame:b];
         g_espView.userInteractionEnabled = NO;
+        g_espView.multipleTouchEnabled = NO;
         g_espView.backgroundColor = UIColor.clearColor;
         g_espView.opaque = NO;
         g_espView.clearsContextBeforeDrawing = YES;
         g_espView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         g_espView.contentMode = UIViewContentModeRedraw;
-        [root insertSubview:g_espView atIndex:0];
+        [root addSubview:g_espView];
     } else {
+        g_espView.userInteractionEnabled = NO;
         g_espView.frame = b;
-        g_espView.center = CGPointMake(b.size.width * 0.5, b.size.height * 0.5);
         if (g_espView.superview != root) {
             [g_espView removeFromSuperview];
-            [root insertSubview:g_espView atIndex:0];
+            [root addSubview:g_espView];
         }
     }
-    // Keep ESP under menu/fab
-    [root sendSubviewToBack:g_espView];
 }
 
 
@@ -604,14 +628,20 @@ extern "C" bool Astral_GetSilentDir(float* x, float* y, float* z) {
 
 // ─── Frame tick ──────────────────────────────────────────────────────────────
 void Astral_FeaturesTick() {
-    // Always keep ESP view full-screen + redraw (FOV works even pre-match)
+    // Always keep ESP full-screen + redraw
     if (g_espView) {
         UIView* root = g_espView.superview;
         if (root) {
-            CGRect b = root.bounds;
+            // If parent is secure container, expand it to fill the host window
+            UIView* host = root.superview;
+            while (host && ![host isKindOfClass:[UIWindow class]] && host.superview)
+                host = host.superview;
+            CGRect b = host ? host.bounds : root.bounds;
+            if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
             b.origin = CGPointZero;
-            if (b.size.width > 2 && b.size.height > 2)
-                g_espView.frame = b;
+            if (root != host && host)
+                root.frame = b;
+            g_espView.frame = b;
         }
         [g_espView setNeedsDisplay];
     }

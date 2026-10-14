@@ -27,7 +27,7 @@ std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
 std::atomic<bool>  g_hideRec{true};       // ON at launch
-std::atomic<bool>  g_menuOpen{true};
+std::atomic<bool>  g_menuOpen{false};
 std::atomic<float> g_fov{15.f};
 std::atomic<float> g_smooth{4.5f};
 std::atomic<int>   g_bone{0};
@@ -124,7 +124,7 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 @end
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
-static ACW*          g_overlay = nil;
+static UIWindow*     g_hostWin = nil;  // GAME key window — no extra overlay
 static UIView*       g_panel   = nil;
 static UIView*       g_fab     = nil;
 static UIView*       g_content = nil;
@@ -143,7 +143,7 @@ static void applyHideRec(UIView* root) {
     if (!root) return;
     BOOL on = g_hideRec.load();
 
-    // panel + FAB always on normal root
+    // Panel + FAB always on root, never inside secure field
     if (g_panel && g_panel.superview != root) {
         [g_panel removeFromSuperview];
         [root addSubview:g_panel];
@@ -153,30 +153,45 @@ static void applyHideRec(UIView* root) {
         [root addSubview:g_fab];
     }
 
-    // ESP must stay on root (full frame). Secure field sits behind as capture shield.
-    Astral_SecureRoot = nil;
-
     if (on) {
+        // Secure field is FULL SCREEN but userInteractionEnabled=NO →
+        // iOS skips the entire subtree in hit-testing → Google/game buttons work.
+        // ESP is parented inside the secure container so it is hidden from screenshots.
         if (!g_secureField) {
             g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
             g_secureField.secureTextEntry = YES;
             g_secureField.userInteractionEnabled = NO;
             g_secureField.backgroundColor = UIColor.clearColor;
-            g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+            g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         }
         g_secureField.frame = root.bounds;
+        g_secureField.userInteractionEnabled = NO;
         if (g_secureField.superview != root)
             [root insertSubview:g_secureField atIndex:0];
-        // Put ESP above secure field but still under menu
-        // (EnsureFOV inserts ESP; we only keep secure at back)
-        [root sendSubviewToBack:g_secureField];
+        else
+            [root sendSubviewToBack:g_secureField];
+
+        // Internal secure container (first subview after secureTextEntry engages)
+        UIView* container = nil;
+        for (UIView* s in g_secureField.subviews) {
+            if (s.bounds.size.width > 1) { container = s; break; }
+        }
+        if (!container) container = g_secureField;
+        container.userInteractionEnabled = NO;
+        container.frame = g_secureField.bounds;
+        Astral_SecureRoot = container;
     } else {
+        Astral_SecureRoot = nil;
         if (g_secureField) {
             [g_secureField removeFromSuperview];
             g_secureField = nil;
         }
     }
-    Astral_EnsureFOVOverlay(g_overlay);
+
+    // Keep interactive chrome in front
+    if (g_panel) [root bringSubviewToFront:g_panel];
+    if (g_fab)   [root bringSubviewToFront:g_fab];
+    Astral_EnsureFOVOverlay(g_hostWin);
 }
 
 
@@ -363,7 +378,7 @@ static void rebuildContent() {
                        L("Hide menu & ESP on screenshots/record","Скрыть меню и ESP на скринах"),
                        g_hideRec.load(), ^(bool v){
                            g_hideRec=v;
-                           UIView* root = g_overlay.rootViewController.view;
+                           UIView* root = g_hostWin.rootViewController.view;
                            applyHideRec(root);
                        }));
     }
@@ -419,7 +434,8 @@ static void buildPanel(UIView* host) {
     g_panel.layer.shadowOpacity = 0.35;
     g_panel.layer.shadowRadius = 16;
     g_panel.clipsToBounds = NO;
-    g_panel.hidden = !g_menuOpen.load();
+    g_panel.hidden = YES; // always start hidden — open via FAB only
+    g_panel.alpha = 0;
 
     // Logo
     UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 28)];
@@ -515,47 +531,46 @@ static void buildFab(UIView* host) {
         });
     });
 }
-+ (void)tryAttach {
++ (UIWindow*)gameWindow {
     UIWindow* key = nil;
     for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
         if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
+        UIWindowScene* ws = (UIWindowScene*)sc;
+        for (UIWindow* w in ws.windows) {
             if (w.isKeyWindow) { key = w; break; }
         }
         if (key) break;
+        if (!key && ws.windows.count) key = ws.windows.firstObject;
     }
-    if (!key) key = UIApplication.sharedApplication.windows.firstObject;
     if (!key) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)),
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        key = UIApplication.sharedApplication.keyWindow;
+        if (!key) key = UIApplication.sharedApplication.windows.firstObject;
+#pragma clang diagnostic pop
+    }
+    return key;
+}
+
++ (void)tryAttach {
+    UIWindow* key = [self gameWindow];
+    if (!key) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4*NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ [self tryAttach]; });
         return;
     }
 
-    // Prefer landscape size (w > h)
-    CGRect kb = key.bounds;
-    if (kb.size.height > kb.size.width) {
-        kb = CGRectMake(0, 0, kb.size.height, kb.size.width);
-    }
+    // NO second UIWindow — Google + game keep their own touch path
+    g_hostWin = key;
+    UIView* root = key.rootViewController.view ?: (UIView*)key;
 
-    if (!g_overlay) {
-        g_overlay = [[ACW alloc] initWithFrame:kb];
-        g_overlay.windowLevel = UIWindowLevelStatusBar + 1;
-        g_overlay.backgroundColor = UIColor.clearColor;
-        g_overlay.userInteractionEnabled = YES;
-        g_overlay.rootViewController = [ACVC new];
-        g_overlay.hidden = NO;
-        // never makeKey — game keeps input focus
-    } else {
-        g_overlay.frame = key.bounds;
-    }
-
-    UIView* root = g_overlay.rootViewController.view;
-    root.frame = g_overlay.bounds;
-    root.userInteractionEnabled = YES;
     buildPanel(root);
     buildFab(root);
     applyHideRec(root);
-    Astral_EnsureFOVOverlay(g_overlay);
+    Astral_EnsureFOVOverlay(key);
+
+    if (g_panel) [root bringSubviewToFront:g_panel];
+    if (g_fab)   [root bringSubviewToFront:g_fab];
 
     if (!g_tick) {
         g_tick = [CADisplayLink displayLinkWithTarget:self selector:@selector(onTick)];
@@ -563,27 +578,24 @@ static void buildFab(UIView* host) {
         [g_tick addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     }
 }
+
 + (void)onTick {
-    // Keep overlay sized to the real key window (rotation / landscape)
-    UIWindow* key = nil;
-    for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
-        if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
-            if (w.isKeyWindow && w != g_overlay) { key = w; break; }
-        }
-        if (key) break;
+    // Stay on the original game window — do NOT jump onto Google/auth sheets
+    UIWindow* key = g_hostWin;
+    if (!key || key.hidden || !key.rootViewController) {
+        key = [self gameWindow];
+        g_hostWin = key;
     }
-    if (key && g_overlay) {
-        CGRect b = key.bounds;
-        if (!CGRectEqualToRect(g_overlay.frame, b)) {
-            g_overlay.frame = b;
-            g_overlay.rootViewController.view.frame = g_overlay.bounds;
-        }
+    if (key) {
+        UIView* root = key.rootViewController.view ?: (UIView*)key;
+        Astral_EnsureFOVOverlay(key);
+        if (g_panel) [root bringSubviewToFront:g_panel];
+        if (g_fab)   [root bringSubviewToFront:g_fab];
     }
-    if (g_overlay)
-        Astral_EnsureFOVOverlay(g_overlay);
     Astral_FeaturesTick();
 }
+
+
 @end
 
 __attribute__((constructor))
