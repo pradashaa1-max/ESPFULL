@@ -5,12 +5,15 @@
 // Feature toggles
 extern std::atomic<bool>  g_aimbot;
 extern std::atomic<bool>  g_silent;
+extern std::atomic<bool>  g_aimVisible;  // aim only if visible
 extern std::atomic<bool>  g_fovDraw;
 extern std::atomic<bool>  g_espBox;
 extern std::atomic<bool>  g_espSkel;
 extern std::atomic<bool>  g_espName;
 extern std::atomic<bool>  g_espHP;
 extern std::atomic<bool>  g_espWeapon;
+extern std::atomic<bool>  g_espBomb;
+extern std::atomic<bool>  g_espGrenade;
 extern std::atomic<bool>  g_espDist;
 extern std::atomic<bool>  g_espTeam;
 extern std::atomic<bool>  g_noRecoil;     // legacy — syncs with recoilPct
