@@ -593,7 +593,6 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat x = sc.x - 3.f;
         CGFloat y = H - sc.y - 3.f;
         if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
-        BOOL isBomb = (strncmp(w.label, "BOMB", 4) == 0);
         UIColor* col = isBomb
             ? [UIColor colorWithRed:1 green:0.35 blue:0.1 alpha:1]
             : [UIColor colorWithRed:1 green:0.85 blue:0.2 alpha:1];
