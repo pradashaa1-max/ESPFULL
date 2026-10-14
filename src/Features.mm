@@ -375,8 +375,8 @@ UIView* g_esp_view(void) { return g_esp; }
 
         CGFloat fx = sf.x - 3.f;
         CGFloat hx = sh.x - 3.f;
-        CGFloat fy = H - sf.y - 8.f;
-        CGFloat hy = H - sh.y - 8.f;
+        CGFloat fy = H - sf.y - 3.f;
+        CGFloat hy = H - sh.y - 3.f;
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
@@ -397,11 +397,8 @@ UIView* g_esp_view(void) { return g_esp; }
             draw_corner(ctx, left, top, wid, hgt, corner);
         }
         if (skel) {
-            CGContextSetStrokeColorWithColor(ctx, col.CGColor);
-            CGContextSetLineWidth(ctx, 1.2);
-            CGContextMoveToPoint(ctx, hx, hy);
-            CGContextAddLineToPoint(ctx, fx, fy);
-            CGContextStrokePath(ctx);
+            // head marker only — no vertical line through box
+            CGContextSetFillColorWithColor(ctx, col.CGColor);
             CGContextFillEllipseInRect(ctx, CGRectMake(hx - 3, hy - 3, 6, 6));
         }
         if (hpOn) {
@@ -514,107 +511,112 @@ static void apply_recoil(void* localPc) {
 }
 
 static void run_aim(void* cam, void* camTr) {
-    std::vector<PSnap> snap;
-    void* localPc = nullptr;
-    {
-        std::lock_guard<std::mutex> lk(g_mtx);
-        snap = g_list;
-        for (auto& s : snap) if (s.local) localPc = s.obj;
-    }
-
-    apply_recoil(localPc);
-
-    if (!g_aimbot.load()) {
-        g_haveSilent = false;
-        return;
-    }
-    if (!ok_ptr(cam) || !ok_ptr(camTr) || !ok_ptr(localPc)) return;
-
-    void* aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
-    if (!ok_ptr(aimCtrl)) return;
-
-    void* aimTr = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
-    if (!ok_ptr(aimTr)) aimTr = camTr;
-
-    CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
-    float cx = scr.width * 0.5f, cy = scr.height * 0.5f;
-    float side = fminf(scr.width, scr.height);
-    float fovR = side * (0.05f + g_fov.load() / 30.f * 0.25f);
-
-    Vec3 cpos = get_pos(aimTr);
-    int localTeam = -1;
-    for (auto& s : snap) if (s.local) localTeam = s.team;
-
-    float boneY = 1.55f;
-    switch (g_bone.load()) {
-        case 1: boneY = 1.35f; break;
-        case 2: boneY = 1.05f; break;
-        default: boneY = 1.55f; break;
-    }
-
-    Vec3 best{};
-    bool have = false;
-    float bestScore = 1e9f;
-
-    for (auto& p : snap) {
-        if (p.local) continue;
-        if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
-
-        Vec3 base = p.pos;
-        if (ok_ptr(p.tr)) {
-            Vec3 live = get_pos(p.tr);
-            if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
+    @try {
+        std::vector<PSnap> snap;
+        void* localPc = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            snap = g_list;
+            for (auto& s : snap) if (s.local) localPc = s.obj;
         }
-        Vec3 bone = {base.x, base.y + boneY, base.z};
 
-        // prefer visible targets
-        if (!is_visible(cpos, bone)) continue;
+        apply_recoil(localPc);
 
-        Vec3 sc = w2s(cam, bone);
-        if (sc.z < 0.05f) continue;
-        float sx = sc.x - 3.f;
-        float sy = (scr.height - sc.y) - 8.f;
-        float dx = sx - cx, dy = sy - cy;
-        float d2 = sqrtf(dx*dx + dy*dy);
-        if (d2 > fovR) continue;
-        if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
-    }
-    if (!have) {
+        if (!g_aimbot.load()) {
+            g_haveSilent = false;
+            return;
+        }
+        if (!ok_ptr(cam) || !ok_ptr(camTr) || !ok_ptr(localPc)) return;
+
+        void* aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
+        if (!ok_ptr(aimCtrl)) return;
+
+        void* aimTr = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
+        if (!ok_ptr(aimTr)) aimTr = camTr;
+
+        CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
+        float cx = scr.width * 0.5f, cy = scr.height * 0.5f;
+        float side = fminf(scr.width, scr.height);
+        float fovR = side * (0.05f + g_fov.load() / 30.f * 0.25f);
+
+        Vec3 cpos = get_pos(aimTr);
+        int localTeam = -1;
+        for (auto& s : snap) if (s.local) localTeam = s.team;
+
+        float boneY = 1.55f;
+        switch (g_bone.load()) {
+            case 1: boneY = 1.35f; break;
+            case 2: boneY = 1.05f; break;
+            default: boneY = 1.55f; break;
+        }
+
+        Vec3 best{};
+        bool have = false;
+        float bestScore = 1e9f;
+
+        for (auto& p : snap) {
+            if (p.local) continue;
+            if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
+
+            Vec3 base = p.pos;
+            if (ok_ptr(p.tr)) {
+                Vec3 live = get_pos(p.tr);
+                if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
+            }
+            Vec3 bone = {base.x, base.y + boneY, base.z};
+
+            Vec3 sc = w2s(cam, bone);
+            if (sc.z < 0.05f) continue;
+            float sx = sc.x - 3.f;
+            float sy = (scr.height - sc.y) - 3.f;
+            float dx = sx - cx, dy = sy - cy;
+            float d2 = sqrtf(dx*dx + dy*dy);
+            if (d2 > fovR) continue;
+            if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
+        }
+        if (!have) {
+            g_haveSilent = false;
+            return;
+        }
+
+        g_silentTarget = best;
+        g_haveSilent = true;
+
+        float sm = fmaxf(1.f, g_smooth.load());
+        if (g_silent.load()) sm = 1.f;
+
+        static Vec3 smT{};
+        static bool ini = false;
+        if (!ini) { smT = best; ini = true; }
+        smT.x += (best.x - smT.x) / sm;
+        smT.y += (best.y - smT.y) / sm;
+        smT.z += (best.z - smT.z) / sm;
+
+        Vec3 dir = vnorm(vsub(smT, cpos));
+        float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
+        float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
+        if (pitch < -85.f) pitch = -85.f;
+        if (pitch >  85.f) pitch =  85.f;
+
+        // Only write if current values look like angles (prevents crash on wrong field)
+        float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
+        float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
+        float curP = *aPitch, curY = *aYaw;
+        bool pitchOk = (curP == curP) && fabsf(curP) <= 180.f;
+        bool yawOk   = (curY == curY) && fabsf(curY) <= 360.f;
+        if (pitchOk) {
+            if (g_silent.load()) *aPitch = pitch;
+            else *aPitch = curP + (pitch - curP) / sm;
+        }
+        if (yawOk) {
+            float dy = yaw - curY;
+            while (dy >  180.f) dy -= 360.f;
+            while (dy < -180.f) dy += 360.f;
+            if (g_silent.load()) *aYaw = yaw;
+            else *aYaw = curY + dy / sm;
+        }
+    } @catch (...) {
         g_haveSilent = false;
-        return;
-    }
-
-    g_silentTarget = best;
-    g_haveSilent = true;
-
-    float sm = fmaxf(1.f, g_smooth.load());
-    // silent: instantaneous angle write (game fires along aim angles) — no LookAt
-    if (g_silent.load()) sm = 1.f;
-
-    static Vec3 smT{};
-    static bool ini = false;
-    if (!ini) { smT = best; ini = true; }
-    smT.x += (best.x - smT.x) / sm;
-    smT.y += (best.y - smT.y) / sm;
-    smT.z += (best.z - smT.z) / sm;
-
-    Vec3 dir = vnorm(vsub(smT, cpos));
-    float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
-    float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
-    if (pitch < -85.f) pitch = -85.f;
-    if (pitch >  85.f) pitch =  85.f;
-
-    // ONLY angle fields — never LookAt (LookAt was making ESP float)
-    float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
-    float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
-    float curP = *aPitch, curY = *aYaw;
-    if (curP == curP && fabsf(curP) < 360.f)
-        *aPitch = g_silent.load() ? pitch : (curP + (pitch - curP) / sm);
-    if (curY == curY && fabsf(curY) < 500.f) {
-        float dy = yaw - curY;
-        while (dy >  180.f) dy -= 360.f;
-        while (dy < -180.f) dy += 360.f;
-        *aYaw = g_silent.load() ? yaw : (curY + dy / sm);
     }
 }
 
