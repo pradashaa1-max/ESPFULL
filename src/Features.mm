@@ -194,6 +194,14 @@ static std::vector<void*> collect_players() {
     return out;
 }
 
+static bool is_mine(void* pc) {
+    if (!pc || !unity_base()) return false;
+    void* pv = *(void**)((char*)pc + Offsets::PC_photonView);
+    if (!alive(pv)) return false;
+    using F = bool (*)(void*);
+    return R<F>(Offsets::PhotonView_get_isMine)(pv);
+}
+
 static void refresh(void* camTr) {
     std::vector<PSnap> tmp;
     if (!camTr || !alive(camTr)) {
@@ -202,16 +210,6 @@ static void refresh(void* camTr) {
         return;
     }
     auto raw = collect_players();
-    Vec3 cpos = get_pos(camTr);
-
-    void* local = nullptr;
-    float best = 1e9f;
-    for (void* pc : raw) {
-        void* tr = pc_tr(pc);
-        if (!tr || !alive(tr)) continue;
-        float d = vdist(get_pos(tr), cpos);
-        if (d < best) { best = d; local = pc; }
-    }
 
     for (void* pc : raw) {
         void* tr = pc_tr(pc);
@@ -223,7 +221,7 @@ static void refresh(void* camTr) {
         s.tr = tr;
         s.pos = p;
         s.team = team_of(pc);
-        s.local = (pc == local && best < 3.5f);
+        s.local = is_mine(pc);
         s.name[0] = 0;
         void* pp = *(void**)((char*)pc + Offsets::PC_photonPlayer);
         if (alive(pp)) {
@@ -239,6 +237,7 @@ static void refresh(void* camTr) {
 
 @interface ESPView : UIView @end
 static ESPView* g_esp = nil;
+UIView* g_esp_view(void) { return g_esp; }
 
 @implementation ESPView
 - (void)drawRect:(CGRect)rect {
@@ -354,23 +353,42 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
 
 static void apply_norecoil(void* localPc) {
     if (!g_noRecoil.load() || !alive(localPc)) return;
+    // PlayerController → WeaponryController → WeaponController → WeaponParameters (GunParameters)
     void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
     if (!alive(wry)) return;
     void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
     if (!alive(wc) && unity_base()) {
         using F = void* (*)(void*);
-        wc = R<F>(0x162E58C)(wry);
+        wc = R<F>(0x162E58C)(wry); // get_ADFFFAGDHFAHEBE
     }
     if (!alive(wc)) return;
-    auto z = [](void* b, size_t o) {
+
+    // WeaponController.WeaponParameters @ 0x68 (GunParameters when gun)
+    void* params = *(void**)((char*)wc + 0x68);
+    if (!alive(params)) return;
+
+    auto zf = [](void* b, size_t o) {
         float* p = (float*)((char*)b + o);
         if (*p == *p && fabsf(*p) < 500.f) *p = 0.f;
     };
-    z(wc, Offsets::WC_recoilMultCrouch);
-    z(wc, Offsets::WC_recoilAimMult);
-    z(wc, Offsets::WC_recoilAimCrouch);
-    int* rc = (int*)((char*)wc + Offsets::WC_recoilControl);
+    // GunParameters recoil multipliers
+    zf(params, 0xD0); // _recoilMultOnCrouch
+    zf(params, 0xD8); // _recoilAimMult
+    zf(params, 0xE0); // _recoilAimMultOnCrouch
+
+    // _recoilControl → max
+    int* rc = (int*)((char*)params + 0xA8);
     if (*rc >= 0 && *rc < 10000) *rc = 100;
+
+    // RecoilParameters object @ 0xB0 — zero angular ranges + camera deviation
+    void* rp = *(void**)((char*)params + 0xB0);
+    if (alive(rp)) {
+        zf(rp, 0x10); // horizontalRange
+        zf(rp, 0x14); // verticalRange
+        zf(rp, 0x48); // cameraDeviationCoeff
+        zf(rp, 0x50); // recoilAccelDuration
+        zf(rp, 0x54); // recoilAccelStep
+    }
 }
 
 static void run_aim(void* cam, void* camTr) {
@@ -407,10 +425,21 @@ static void run_aim(void* cam, void* camTr) {
     bool have = false;
     float bestScore = 1e9f;
     Vec3 cpos = get_pos(aimTr);
+    int localTeam = -1;
+    for (auto& s : snap) if (s.local) localTeam = s.team;
+
+    // bone height: 0 head 1 neck 2 chest
+    float boneY = 1.65f;
+    switch (g_bone.load()) {
+        case 1: boneY = 1.45f; break;
+        case 2: boneY = 1.15f; break;
+        default: boneY = 1.65f; break;
+    }
 
     for (auto& p : snap) {
         if (p.local) continue;
-        Vec3 bone = {p.pos.x, p.pos.y + 1.5f, p.pos.z};
+        if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
+        Vec3 bone = {p.pos.x, p.pos.y + boneY, p.pos.z};
         Vec3 sc = w2s(cam, bone);
         if (sc.z < 0.02f) continue;
         float sx = sc.x, sy = scr.height - sc.y;
@@ -418,17 +447,6 @@ static void run_aim(void* cam, void* camTr) {
         float d2 = sqrtf(dx * dx + dy * dy);
         if (d2 > fovR) continue;
         if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
-    }
-    if (!have) {
-        for (auto& p : snap) {
-            if (p.local) continue;
-            float d = vdist(p.pos, cpos);
-            if (d < bestScore && d < 60.f) {
-                bestScore = d;
-                best = {p.pos.x, p.pos.y + 1.5f, p.pos.z};
-                have = true;
-            }
-        }
     }
     if (!have) return;
 

@@ -34,6 +34,54 @@ std::atomic<int>   g_bone{0};
 std::atomic<int>   g_lang{0};             // 0 EN 1 RU
 std::atomic<uint32_t> g_menuColor{0xFF1E90FF};
 
+// ─── Config persist (NSUserDefaults) ─────────────────────────────────────────
+void Astral_SaveConfig(void) {
+    NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
+    [d setBool:g_aimbot.load()   forKey:@"astral_aimbot"];
+    [d setBool:g_silent.load()   forKey:@"astral_silent"];
+    [d setBool:g_fovDraw.load()  forKey:@"astral_fovDraw"];
+    [d setBool:g_espBox.load()   forKey:@"astral_espBox"];
+    [d setBool:g_espSkel.load()  forKey:@"astral_espSkel"];
+    [d setBool:g_espName.load()  forKey:@"astral_espName"];
+    [d setBool:g_espHP.load()    forKey:@"astral_espHP"];
+    [d setBool:g_espWeapon.load()forKey:@"astral_espWeapon"];
+    [d setBool:g_espDist.load()  forKey:@"astral_espDist"];
+    [d setBool:g_espTeam.load()  forKey:@"astral_espTeam"];
+    [d setBool:g_noRecoil.load() forKey:@"astral_noRecoil"];
+    [d setBool:g_hideRec.load()  forKey:@"astral_hideRec"];
+    [d setFloat:g_fov.load()     forKey:@"astral_fov"];
+    [d setFloat:g_smooth.load()  forKey:@"astral_smooth"];
+    [d setInteger:g_bone.load()  forKey:@"astral_bone"];
+    [d setInteger:g_lang.load()  forKey:@"astral_lang"];
+    [d setInteger:(NSInteger)g_menuColor.load() forKey:@"astral_menuColor"];
+    [d synchronize];
+}
+
+void Astral_LoadConfig(void) {
+    NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
+    if (![d objectForKey:@"astral_hideRec"]) return; // first launch — keep defaults
+    g_aimbot.store([d boolForKey:@"astral_aimbot"]);
+    g_silent.store([d boolForKey:@"astral_silent"]);
+    g_fovDraw.store([d boolForKey:@"astral_fovDraw"]);
+    g_espBox.store([d boolForKey:@"astral_espBox"]);
+    g_espSkel.store([d boolForKey:@"astral_espSkel"]);
+    g_espName.store([d boolForKey:@"astral_espName"]);
+    g_espHP.store([d boolForKey:@"astral_espHP"]);
+    g_espWeapon.store([d boolForKey:@"astral_espWeapon"]);
+    g_espDist.store([d boolForKey:@"astral_espDist"]);
+    g_espTeam.store([d boolForKey:@"astral_espTeam"]);
+    g_noRecoil.store([d boolForKey:@"astral_noRecoil"]);
+    g_hideRec.store([d boolForKey:@"astral_hideRec"]);
+    float f = [d floatForKey:@"astral_fov"];
+    if (f > 0.5f && f < 40.f) g_fov.store(f);
+    float sm = [d floatForKey:@"astral_smooth"];
+    if (sm >= 1.f && sm <= 20.f) g_smooth.store(sm);
+    g_bone.store((int)[d integerForKey:@"astral_bone"]);
+    g_lang.store((int)[d integerForKey:@"astral_lang"]);
+    NSInteger col = [d integerForKey:@"astral_menuColor"];
+    if (col != 0) g_menuColor.store((uint32_t)col);
+}
+
 // ─── Locale ──────────────────────────────────────────────────────────────────
 static NSString* L(const char* en, const char* ru) {
     return g_lang.load() == 1 ? [NSString stringWithUTF8String:ru]
@@ -207,6 +255,12 @@ static void applyHideRec(UIView* root) {
             [g_fab removeFromSuperview];
             [container addSubview:g_fab];
         }
+        extern UIView* g_esp_view(void);
+        UIView* esp = g_esp_view();
+        if (esp && esp.superview != container) {
+            [esp removeFromSuperview];
+            [container insertSubview:esp atIndex:0];
+        }
     } else {
         Astral_SecureRoot = nil;
         // Move chrome back to overlay root
@@ -217,6 +271,12 @@ static void applyHideRec(UIView* root) {
         if (g_fab && g_fab.superview != root) {
             [g_fab removeFromSuperview];
             [root addSubview:g_fab];
+        }
+        extern UIView* g_esp_view(void);
+        UIView* esp = g_esp_view();
+        if (esp && esp.superview != root) {
+            [esp removeFromSuperview];
+            [root insertSubview:esp atIndex:0];
         }
         if (g_secureField) {
             [g_secureField removeFromSuperview];
@@ -667,18 +727,36 @@ static void buildFab(UIView* host) {
     }
     if (g_hostWin) {
         UIView* root = g_hostWin.rootViewController.view;
-        // keep secure full-size
+        // keep secure full-size — interaction MUST stay YES so panel/fab receive touches
         if (g_secureField) {
             g_secureField.frame = root.bounds;
-            g_secureField.userInteractionEnabled = NO;
+            g_secureField.userInteractionEnabled = YES;
             if (Astral_SecureRoot) {
                 Astral_SecureRoot.frame = root.bounds;
-                Astral_SecureRoot.userInteractionEnabled = NO;
+                Astral_SecureRoot.userInteractionEnabled = YES;
+            }
+        }
+        // re-home ESP into secure container every tick when hide is on
+        if (g_hideRec.load() && Astral_SecureRoot) {
+            extern UIView* g_esp_view(void);
+            UIView* esp = g_esp_view();
+            if (esp && esp.superview != Astral_SecureRoot) {
+                [esp removeFromSuperview];
+                [Astral_SecureRoot insertSubview:esp atIndex:0];
+            }
+            if (g_panel && g_panel.superview != Astral_SecureRoot) {
+                [g_panel removeFromSuperview];
+                [Astral_SecureRoot addSubview:g_panel];
+            }
+            if (g_fab && g_fab.superview != Astral_SecureRoot) {
+                [g_fab removeFromSuperview];
+                [Astral_SecureRoot addSubview:g_fab];
             }
         }
         Astral_EnsureFOVOverlay(g_hostWin);
-        if (g_panel) [root bringSubviewToFront:g_panel];
-        if (g_fab)   [root bringSubviewToFront:g_fab];
+        UIView* front = Astral_SecureRoot ?: root;
+        if (g_panel) [front bringSubviewToFront:g_panel];
+        if (g_fab)   [front bringSubviewToFront:g_fab];
     }
     Astral_FeaturesTick();
 }
