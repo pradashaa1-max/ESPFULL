@@ -99,6 +99,43 @@ static int team_of(void* pc) {
     return (int)*(uint8_t*)((char*)pc + Offsets::PC_team);
 }
 
+static bool is_mine(void* pc) {
+    if (!pc || !unity_base()) return false;
+    void* pv = *(void**)((char*)pc + Offsets::PC_photonView);
+    if (!alive(pv)) return false;
+    using F = bool(*)(void*);
+    return R<F>(Offsets::PhotonView_get_isMine)(pv);
+}
+
+static void* local_aim_cam(void* localPc) {
+    if (!localPc) return nullptr;
+    void* ac = *(void**)((char*)localPc + Offsets::PC_aimController);
+    if (!alive(ac)) return nullptr;
+    void* ct = *(void**)((char*)ac + Offsets::AC_camTransform);
+    if (alive(ct)) return ct;
+    ct = *(void**)((char*)ac + Offsets::AC_FPSCamera);
+    return alive(ct) ? ct : nullptr;
+}
+
+static void apply_norecoil(void* localPc) {
+    if (!g_noRecoil.load() || !localPc) return;
+    void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
+    if (!alive(wry)) return;
+    void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
+    if (!alive(wc)) return;
+    // zero multipliers
+    *(float*)((char*)wc + Offsets::WC_recoilMultCrouch) = 0.f;
+    *(float*)((char*)wc + Offsets::WC_recoilAimMult) = 0.f;
+    *(float*)((char*)wc + Offsets::WC_recoilAimCrouch) = 0.f;
+    void* rp = *(void**)((char*)wc + Offsets::WC_recoilParams);
+    if (alive(rp)) {
+        *(float*)((char*)rp + Offsets::RP_horiz) = 0.f;
+        *(float*)((char*)rp + Offsets::RP_vert) = 0.f;
+        *(float*)((char*)rp + Offsets::RP_camDev) = 0.f;
+    }
+}
+
+
 static void read_str(void* strObj, char* out, size_t n) {
     out[0]=0; if (!strObj||n==0) return;
     int32_t len = *(int32_t*)((char*)strObj + 0x10);
@@ -243,14 +280,21 @@ static void refresh(void* camTr) {
         std::lock_guard<std::mutex> lk(g_mtx); g_list.swap(tmp); return;
     }
     auto raw = collect_players();
-    Vec3 cpos = get_pos(camTr);
-    void* local = nullptr; float best = 1e9f;
+    void* local = nullptr;
     for (void* pc : raw) {
-        void* tr = pc_tr(pc); if (!tr||!alive(tr)) continue;
-        float d = vdist(get_pos(tr), cpos);
-        if (d < best) { best=d; local=pc; }
+        if (is_mine(pc)) { local = pc; break; }
     }
-    if (best > 20.f) local = nullptr;
+    // fallback: closest to camera if isMine failed
+    if (!local) {
+        Vec3 cpos = get_pos(camTr);
+        float best = 1e9f;
+        for (void* pc : raw) {
+            void* tr = pc_tr(pc); if (!tr||!alive(tr)) continue;
+            float d = vdist(get_pos(tr), cpos);
+            if (d < best) { best = d; local = pc; }
+        }
+        if (best > 8.f) local = nullptr;
+    }
 
     for (void* pc : raw) {
         if (!alive(pc)) continue;
@@ -259,7 +303,8 @@ static void refresh(void* camTr) {
         if (p.x!=p.x || fabsf(p.x)>1e5f) continue;
         PSnap s{};
         s.obj=pc; s.tr=tr; s.pos=p;
-        s.team=team_of(pc); s.local=(pc==local);
+        s.team=team_of(pc);
+        s.local = (pc == local) || is_mine(pc);
         s.hp=100.f; s.dead=false; s.ammo=-1;
         fill_nick(pc, s.name, sizeof(s.name));
         s.weapon[0]=0;
@@ -322,7 +367,7 @@ static ESPView* g_esp = nil;
 
     for (auto& p : snap) {
         if (p.local || p.dead) continue;
-        if (g_espTeam.load() && localTeam>=0 && p.team==localTeam) continue;
+        if (localTeam >= 0 && p.team == localTeam) continue; // enemies only
 
         Vec3 feet = p.pos;
         Vec3 head = vadd(p.pos, {0, 1.75f, 0});
@@ -415,39 +460,64 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
 
 // ── Aim ──────────────────────────────────────────────────────────────────────
 static void run_aim(void* cam, void* camTr) {
-    if (!g_aimbot.load() && !g_silent.load()) return;
-    if (!cam || !camTr) return;
-    Vec3 cpos = get_pos(camTr);
-    float maxR = 5.f + g_fov.load() * 2.f; // soft distance gate
+    if (!g_aimbot.load() && !g_silent.load() && !g_noRecoil.load()) return;
 
-    void* bestTr = nullptr; Vec3 bestBone{}; float best = 1e9f;
+    void* localPc = nullptr;
     int localTeam = -1;
     std::vector<PSnap> snap;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         snap = g_list;
-        for (auto& s: snap) if (s.local) localTeam = s.team;
+        for (auto& s : snap) {
+            if (s.local) { localPc = s.obj; localTeam = s.team; }
+        }
     }
+
+    if (g_noRecoil.load() && localPc)
+        apply_norecoil(localPc);
+
+    if (!g_aimbot.load() && !g_silent.load()) return;
+    if (!cam || !camTr) return;
+
+    void* aimTr = local_aim_cam(localPc);
+    if (!aimTr) aimTr = camTr;
+
+    Vec3 cpos = get_pos(aimTr);
+    CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
+    float cx = scr.width * 0.5f, cy = scr.height * 0.5f;
+    float maxFovPx = fminf(scr.width, scr.height) * (0.04f + (g_fov.load() / 30.f) * 0.22f);
+
+    Vec3 bestBone{};
+    bool have = false;
+    float bestScore = 1e9f;
     for (auto& p : snap) {
         if (p.local || p.dead) continue;
-        if (g_espTeam.load() && localTeam>=0 && p.team==localTeam) continue;
+        if (localTeam >= 0 && p.team == localTeam) continue;
         Vec3 bone = vadd(p.pos, {0, 1.55f, 0});
-        float d = vdist(bone, cpos);
-        if (d < best) { best=d; bestTr=p.tr; bestBone=bone; }
+        Vec3 sc = w2s(cam, bone);
+        if (sc.z < 0.1f) continue;
+        float sx = sc.x, sy = scr.height - sc.y;
+        float dx = sx - cx, dy = sy - cy;
+        float dist2d = sqrtf(dx * dx + dy * dy);
+        if (dist2d > maxFovPx * 1.6f) continue;
+        float score = dist2d + vdist(bone, cpos) * 0.05f;
+        if (score < bestScore) {
+            bestScore = score;
+            bestBone = bone;
+            have = true;
+        }
     }
-    if (!bestTr || best > 80.f) return;
+    if (!have) return;
 
     if (g_aimbot.load()) {
         float sm = fmaxf(1.f, g_smooth.load());
-        Vec3 cur = cpos;
-        // smooth: look toward point between current forward target and bone
-        Vec3 target = bestBone;
-        // simple: look_at each frame with slight lag via mixing positions
-        static Vec3 smTarget = bestBone;
-        smTarget.x += (target.x - smTarget.x) / sm;
-        smTarget.y += (target.y - smTarget.y) / sm;
-        smTarget.z += (target.z - smTarget.z) / sm;
-        look_at(camTr, smTarget);
+        static Vec3 smTarget{};
+        static bool init = false;
+        if (!init) { smTarget = bestBone; init = true; }
+        smTarget.x += (bestBone.x - smTarget.x) / sm;
+        smTarget.y += (bestBone.y - smTarget.y) / sm;
+        smTarget.z += (bestBone.z - smTarget.z) / sm;
+        look_at(aimTr, smTarget);
     }
 }
 
@@ -465,7 +535,7 @@ void Astral_FeaturesTick() {
 
     bool wantEsp = g_espBox.load()||g_espSkel.load()||g_espName.load()
                 ||g_espHP.load()||g_espWeapon.load()||g_espDist.load()||g_fovDraw.load();
-    bool wantAim = g_aimbot.load()||g_silent.load();
+    bool wantAim = g_aimbot.load()||g_silent.load()||g_noRecoil.load();
     if (!wantEsp && !wantAim) return;
     if (!unity_base()) return;
 
