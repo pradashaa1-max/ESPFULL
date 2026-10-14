@@ -368,7 +368,7 @@ static void rebuildContent() {
     if (g_section == 0) { // Aim
         add(makeSwitch(L("Aim bot","Аимбот"),
                        L("Automatically aims at enemies","Автоматически наводится на врагов"),
-                       g_aimbot.load(), ^(bool v){ g_aimbot=v; }));
+                       g_aimbot.load(), ^(bool v){ g_aimbot=v; if(v) g_fovDraw=true; }));
         add(makeSwitch(L("Silent","Сайлент"),
                        L("Hides your aim from other players","Скрывает наводку от других"),
                        g_silent.load(), ^(bool v){ g_silent=v; }));
@@ -384,7 +384,7 @@ static void rebuildContent() {
     else if (g_section == 1) { // Visuals
         add(makeSwitch(L("Box ESP","Бокс ESP"),
                        L("2D box around players","Рамка вокруг игроков"),
-                       g_espBox.load(), ^(bool v){ g_espBox=v; }));
+                       g_espBox.load(), ^(bool v){ g_espBox=v; if(v) g_fovDraw=true; }));
         add(makeSwitch(L("Skeleton","Скелет"),
                        L("Bone lines","Линии костей"),
                        g_espSkel.load(), ^(bool v){ g_espSkel=v; }));

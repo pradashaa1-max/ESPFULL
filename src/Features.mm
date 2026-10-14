@@ -110,11 +110,12 @@ static void* pc_transform(void* pc) {
 static Vec3 w2s(void* cam, Vec3 world) {
     Vec3 out{0,0,0};
     if (!cam || !unity_base()) return out;
-    // WorldToScreenPoint_Injected(ref pos, eye, out ret) — eye Mono=0
-    using fn_t = void (*)(void*, Vec3*, int, Vec3*);
-    int eye = 2; // MonoOrStereoscopicEye.Mono = 2 on many builds; try 0 first
-    eye = 0;
-    RVA<fn_t>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &world, eye, &out);
+    using inj_t = void (*)(void*, Vec3*, int, Vec3*);
+    // eye: 0 = Left, 1 = Right, 2 = Mono
+    RVA<inj_t>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &world, 2, &out);
+    if (out.x == 0 && out.y == 0 && out.z == 0) {
+        RVA<inj_t>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &world, 0, &out);
+    }
     return out;
 }
 
@@ -210,85 +211,106 @@ static bool unity_alive(void* obj) {
     return native != nullptr;
 }
 
-static std::vector<void*> find_players_raw() {
+static std::vector<void*> find_players_via_fot() {
     std::vector<void*> out;
     auto& api = IL2CPP();
-    if (!api.ready && !api.init()) return out;
-    if (!api.runtime_invoke) return out;
+    if (!api.class_get_type || !api.type_get_object || !api.runtime_invoke) return out;
+    Il2CppClass* pcKlass = api.find_class("Axlebolt.Standoff.Player", "PlayerController");
+    if (!pcKlass) pcKlass = api.find_class("", "PlayerController");
+    if (!pcKlass) return out;
+    Il2CppClass* objKlass = api.find_class("UnityEngine", "Object");
+    if (!objKlass) return out;
+    // FindObjectsOfType(Type) — argc 1
+    const MethodInfo* fot = api.find_method(objKlass, "FindObjectsOfType", 1);
+    if (!fot) return out;
+    const Il2CppType* ty = api.class_get_type(pcKlass);
+    if (!ty) return out;
+    Il2CppObject* typeObj = api.type_get_object(ty);
+    if (!typeObj) return out;
+    void* args[1] = { typeObj };
+    void* exc = nullptr;
+    Il2CppObject* arrObj = api.runtime_invoke(fot, nullptr, args, &exc);
+    if (exc || !arrObj) return out;
+    auto* arr = (Il2CppArraySimple*)arrObj;
+    uintptr_t len = arr->max_length;
+    if (api.array_length) len = api.array_length(arrObj);
+    if (len > 48) len = 48;
+    for (uintptr_t i = 0; i < len; i++) {
+        void* o = arr->vector[i];
+        if (unity_alive(o)) out.push_back(o);
+    }
+    return out;
+}
 
-    // Preferred: PlayerManager.HashSet via property — no FindObjectsOfType (crashes on load)
+static std::vector<void*> find_players_via_manager() {
+    std::vector<void*> out;
+    auto& api = IL2CPP();
+    if (!api.runtime_invoke) return out;
     Il2CppClass* pmKlass = api.find_class("Axlebolt.Standoff.Player", "PlayerManager");
     if (!pmKlass) return out;
 
-    // LazySingleton<object>.get_HGGHFBCAGEEGBDH → Instance
-    const MethodInfo* getInst = api.find_method(pmKlass, "get_HGGHFBCAGEEGBDH", 0);
-    if (!getInst) getInst = api.find_method(pmKlass, "get_Instance", 0);
-    if (!getInst) getInst = api.find_method(pmKlass, "GHAFGAACAEHABEF", 0);
-
-    void* exc = nullptr;
+    // Try several instance getters
+    const char* getters[] = {
+        "get_HGGHFBCAGEEGBDH", "get_Instance", "GHAFGAACAEHABEF", "get_instance", nullptr
+    };
     Il2CppObject* inst = nullptr;
-    if (getInst) {
-        inst = api.runtime_invoke(getInst, nullptr, nullptr, &exc);
-        if (exc) return out;
+    for (int i = 0; getters[i]; i++) {
+        const MethodInfo* m = api.find_method(pmKlass, getters[i], 0);
+        if (!m) continue;
+        void* exc = nullptr;
+        inst = api.runtime_invoke(m, nullptr, nullptr, &exc);
+        if (!exc && unity_alive(inst)) break;
+        inst = nullptr;
     }
-    if (!inst || !unity_alive(inst)) {
-        // fallback: static field on LazySingleton at 0x0 in type statics — skip if no method
-        return out;
-    }
+    if (!inst) return out;
 
-    // HashSet property get_CEADFCHEEGGGDHC
+    // HashSet via property
+    Il2CppObject* hs = nullptr;
     const MethodInfo* getHs = api.find_method(pmKlass, "get_CEADFCHEEGGGDHC", 0);
-    Il2CppObject* hsObj = nullptr;
     if (getHs) {
-        exc = nullptr;
-        hsObj = api.runtime_invoke(getHs, inst, nullptr, &exc);
-        if (exc) hsObj = nullptr;
+        void* exc = nullptr;
+        hs = api.runtime_invoke(getHs, inst, nullptr, &exc);
+        if (exc) hs = nullptr;
     }
-    if (!hsObj) {
-        // field at +0x28
-        hsObj = *(Il2CppObject**)((char*)inst + Offsets::PM_hashset);
-    }
-    if (!hsObj || !unity_alive(hsObj)) return out;
+    if (!unity_alive(hs))
+        hs = *(Il2CppObject**)((char*)inst + 0x28);
+    if (!unity_alive(hs)) return out;
 
-    // HashSet`1 IL2CPP layout (approximate):
-    // 0x10: _buckets, 0x18: _slots, 0x20: _count (int), ...
-    // slots is array of Slot { hashCode, next, value }
-    int count = *(int*)((char*)hsObj + 0x20);
-    if (count <= 0 || count > 32) {
-        // try alternate count offset
-        count = *(int*)((char*)hsObj + 0x18);
-        if (count <= 0 || count > 32) return out;
-    }
+    // Also pull local player pointers from manager
+    void* locA = *(void**)((char*)inst + 0x68);
+    void* locB = *(void**)((char*)inst + 0x70);
+    if (unity_alive(locA)) out.push_back(locA);
+    if (unity_alive(locB) && locB != locA) out.push_back(locB);
 
-    void* slots = *(void**)((char*)hsObj + 0x18); // may be _slots
-    if (!slots) slots = *(void**)((char*)hsObj + 0x10);
-    if (!slots) return out;
+    // HashSet._slots: typical offsets — try 0x18 then 0x10
+    void* slotsArr = *(void**)((char*)hs + 0x18);
+    if (!slotsArr) slotsArr = *(void**)((char*)hs + 0x10);
+    if (!slotsArr) return out;
 
-    // Il2CppArray: max_length at +0x18, vector at +0x20
-    auto* arr = (Il2CppArraySimple*)slots;
-    uintptr_t len = arr->max_length;
-    if (len > 128) len = 128;
-
-    // Slot size often 0x18 on 64-bit: int hash, int next, object value  — or 0x10
-    // Safer: scan pointer-aligned words in slots array payload for alive PlayerControllers
-    // Payload starts at vector[0]
-    uintptr_t bytes = len * 24; // over-read bound
-    if (bytes > 0x2000) bytes = 0x2000;
+    auto* arr = (Il2CppArraySimple*)slotsArr;
+    uintptr_t n = arr->max_length;
+    if (n > 256) n = 256;
+    // Slot: hashCode(i32) + next(i32) + value(ptr) = 16 bytes
     uint8_t* base = (uint8_t*)&arr->vector[0];
-    for (uintptr_t off = 0; off + 8 <= bytes && out.size() < 24; off += 8) {
-        void* cand = *(void**)(base + off);
-        if (!unity_alive(cand)) continue;
-        // must look like a managed object with transform field
-        void* tr = *(void**)((char*)cand + Offsets::PC_transform);
-        if (!unity_alive(tr) && !tr) continue;
-        if (tr && unity_alive(tr)) {
-            // avoid dups
-            bool dup = false;
-            for (void* e : out) if (e == cand) { dup = true; break; }
-            if (!dup) out.push_back(cand);
-        }
+    for (uintptr_t i = 0; i < n && out.size() < 32; i++) {
+        void* val = *(void**)(base + i * 16 + 8); // value at +8 in slot
+        if (!unity_alive(val)) continue;
+        void* tr = *(void**)((char*)val + Offsets::PC_transform);
+        if (!tr) continue;
+        bool dup = false;
+        for (void* e : out) if (e == val) { dup = true; break; }
+        if (!dup) out.push_back(val);
     }
     return out;
+}
+
+static std::vector<void*> find_players_raw() {
+    // Path 1: PlayerManager (preferred)
+    auto a = find_players_via_manager();
+    if (!a.empty()) return a;
+    // Path 2: FindObjectsOfType
+    auto b = find_players_via_fot();
+    return b;
 }
 
 static void refresh_players(void* camTr) {
@@ -705,7 +727,7 @@ void Astral_FeaturesTick() {
     static void* lastCam = nullptr;
     if (cam != lastCam) { stable = 0; lastCam = cam; }
     stable++;
-    if (stable < 90) return; // ~1.5s
+    if (stable < 30) return; // ~0.5s
 
     if (wantEsp || wantAim) {
         if (++g_refresh_ctr >= 25) {
