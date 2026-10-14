@@ -310,9 +310,13 @@ static void refresh(void* camTr) {
     if (mines == 0 && !tmp.empty() && bestD < 5.f)
         tmp[bestIdx].local = true;
 
-    // Safe bomb/grenade: only Component_get_transform + get_pos, no raw field spam
+    // Safe bomb/grenade: ONLY get_tr + get_pos. No field reads (0xA8/0x18 crashed on enter).
     std::vector<WorldSnap> wtmp;
-    if ((g_espBomb.load() || g_espGrenade.load()) && (IL2CPP().ready || IL2CPP().init())) {
+    static int world_ctr = 0;
+    // only every 15 refreshes, and only if we already have players (match started)
+    bool doWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty() && (++world_ctr >= 15);
+    if (doWorld) world_ctr = 0;
+    if (doWorld && (IL2CPP().ready || IL2CPP().init())) {
         auto& api = IL2CPP();
         auto collectSafe = [&](const char* ns, const char* cls, bool isBomb) {
             if (isBomb && !g_espBomb.load()) return;
@@ -322,9 +326,9 @@ static void refresh(void* camTr) {
                 if (!k) k = api.find_class("", cls);
                 if (!k || !api.class_get_type || !api.type_get_object) return;
                 const Il2CppType* ty = api.class_get_type(k);
-                Il2CppObject* typeObj = ty ? api.type_get_object(ty) : nullptr;
+                if (!ty) return;
+                Il2CppObject* typeObj = api.type_get_object(ty);
                 if (!typeObj) return;
-                std::vector<void*> arr;
                 Il2CppClass* objK = api.find_class("UnityEngine", "Object");
                 if (!objK) return;
                 const MethodInfo* fot = api.find_method(objK, "FindObjectsOfType", 1);
@@ -332,7 +336,8 @@ static void refresh(void* camTr) {
                 void* exc = nullptr;
                 void* args[1] = { typeObj };
                 Il2CppObject* a = api.runtime_invoke(fot, nullptr, args, &exc);
-                if (exc || !a) return;
+                if (exc || !ok_ptr(a)) return;
+                std::vector<void*> arr;
                 push_array(a, arr, api);
                 for (void* o : arr) {
                     if (!ok_ptr(o)) continue;
@@ -340,43 +345,37 @@ static void refresh(void* camTr) {
                         void* tr = get_tr(o);
                         if (!ok_ptr(tr)) continue;
                         Vec3 pos = get_pos(tr);
-                        if (pos.x != pos.x || fabsf(pos.x) > 1e5f) continue;
+                        if (pos.x != pos.x || fabsf(pos.x) > 1e5f || fabsf(pos.y) > 1e5f) continue;
                         WorldSnap w{};
                         w.pos = pos;
                         w.timer = -1.f;
-                        if (isBomb) {
-                            float rem = *(float*)((char*)o + 0xA8);
-                            if (rem == rem && rem >= 0.f && rem <= 60.f) {
-                                w.timer = rem;
-                                snprintf(w.label, sizeof(w.label), "BOMB %.0fs", rem);
-                            } else {
-                                snprintf(w.label, sizeof(w.label), "BOMB");
-                            }
-                        } else {
-                            snprintf(w.label, sizeof(w.label), "GRENADE");
-                            // optional name from parameters @ 0x18
-                            void* gp = *(void**)((char*)o + 0x18);
-                            if (ok_ptr(gp)) {
-                                void* ns = *(void**)((char*)gp + 0x10);
-                                char tmpn[20]{};
-                                if (ok_ptr(ns)) read_str(ns, tmpn, sizeof(tmpn));
-                                if (tmpn[0]) snprintf(w.label, sizeof(w.label), "%s", tmpn);
-                            }
-                        }
+                        if (isBomb) snprintf(w.label, sizeof(w.label), "BOMB");
+                        else        snprintf(w.label, sizeof(w.label), "GRENADE");
                         wtmp.push_back(w);
+                        if (wtmp.size() > 12) break;
                     } @catch (...) {}
                 }
             } @catch (...) {}
         };
-        collectSafe("Axlebolt.Standoff.Inventory.Bomb", "PlantedBombController", true);
-        collectSafe("", "PlantedBombController", true);
-        collectSafe("Axlebolt.Standoff.Inventory.Grenade", "DroppedGrenadeController", false);
-        collectSafe("", "DroppedGrenadeController", false);
+        if (g_espBomb.load()) {
+            collectSafe("Axlebolt.Standoff.Inventory.Bomb", "PlantedBombController", true);
+            if (wtmp.empty())
+                collectSafe("", "PlantedBombController", true);
+        }
+        if (g_espGrenade.load()) {
+            collectSafe("Axlebolt.Standoff.Inventory.Grenade", "DroppedGrenadeController", false);
+            if (wtmp.size() < 12)
+                collectSafe("", "DroppedGrenadeController", false);
+        }
     }
 
     std::lock_guard<std::mutex> lk(g_mtx);
     g_list.swap(tmp);
-    g_world.swap(wtmp);
+    // only update world list when we collected; else keep previous (or clear if toggled off)
+    if (doWorld || (!g_espBomb.load() && !g_espGrenade.load())) {
+        g_world.swap(wtmp);
+    }
+
 }
 
 static void draw_corner(CGContextRef ctx, CGFloat l, CGFloat t, CGFloat w, CGFloat h, CGFloat len) {
