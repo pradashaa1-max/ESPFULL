@@ -184,48 +184,49 @@ static void push_array(void* arrObj, std::vector<void*>& out, Il2CppApi& api) {
 
 static std::vector<void*> collect_players() {
     std::vector<void*> out;
-    auto& api = IL2CPP();
-    if (!api.ready && !api.init()) return out;
+    @try {
+        auto& api = IL2CPP();
+        if (!api.ready && !api.init()) return out;
 
-    Il2CppClass* pcK = api.find_class("Axlebolt.Standoff.Player", "PlayerController");
-    if (!pcK) pcK = api.find_class("", "PlayerController");
-    if (!pcK) return out;
-    if (!api.class_get_type || !api.type_get_object) return out;
+        Il2CppClass* pcK = api.find_class("Axlebolt.Standoff.Player", "PlayerController");
+        if (!pcK) pcK = api.find_class("", "PlayerController");
+        if (!pcK) return out;
+        if (!api.class_get_type || !api.type_get_object) return out;
 
-    const Il2CppType* ty = api.class_get_type(pcK);
-    Il2CppObject* typeObj = ty ? api.type_get_object(ty) : nullptr;
-    if (!typeObj) return out;
+        const Il2CppType* ty = api.class_get_type(pcK);
+        if (!ty) return out;
+        Il2CppObject* typeObj = api.type_get_object(ty);
+        if (!typeObj) return out;
 
-    Il2CppClass* objK = api.find_class("UnityEngine", "Object");
-    if (objK) {
-        const MethodInfo* fot = api.find_method(objK, "FindObjectsOfType", 1);
-        if (fot) {
-            void* exc = nullptr;
-            void* args[1] = { typeObj };
-            Il2CppObject* arr = api.runtime_invoke(fot, nullptr, args, &exc);
-            if (!exc) push_array(arr, out, api);
+        Il2CppClass* objK = api.find_class("UnityEngine", "Object");
+        if (objK) {
+            const MethodInfo* fot = api.find_method(objK, "FindObjectsOfType", 1);
+            if (fot) {
+                void* exc = nullptr;
+                void* args[1] = { typeObj };
+                Il2CppObject* arr = api.runtime_invoke(fot, nullptr, args, &exc);
+                if (!exc && ok_ptr(arr)) push_array(arr, out, api);
+            }
         }
-    }
-    if (out.empty() && unity_base()) {
-        using F = void* (*)(void*, bool);
-        push_array(R<F>(0x331EBF8)(typeObj, true), out, api);
-    }
-    if (out.empty() && unity_base()) {
-        using F = void* (*)(void*);
-        push_array(R<F>(0x3318364)(typeObj), out, api);
-    }
+        // skip raw RVA fallbacks on match load — they crash more often
+    } @catch (...) {}
     return out;
 }
 
 static bool is_mine(void* pc) {
     if (!ok_ptr(pc) || !unity_base()) return false;
-    void* pv = *(void**)((char*)pc + Offsets::PC_photonView);
-    if (!ok_ptr(pv)) return false;
-    using F = bool (*)(void*);
-    return R<F>(Offsets::PhotonView_get_isMine)(pv);
+    @try {
+        void* pv = *(void**)((char*)pc + Offsets::PC_photonView);
+        if (!ok_ptr(pv)) return false;
+        using F = bool (*)(void*);
+        return R<F>(Offsets::PhotonView_get_isMine)(pv);
+    } @catch (...) {
+        return false;
+    }
 }
 
 static void refresh(void* camTr) {
+  @try {
     std::vector<PSnap> tmp;
     if (!ok_ptr(camTr)) {
         std::lock_guard<std::mutex> lk(g_mtx);
@@ -250,51 +251,46 @@ static void refresh(void* camTr) {
         s.pos = p;
         s.team = team_of(pc);
         s.local = is_mine(pc);
-        s.hp = read_hp01(pc);
+        s.hp = -1.f;
         s.armor = -1.f;
         s.ammo = -1;
         s.ammoMax = -1;
         s.weapon[0] = 0;
-        void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
-        if (ok_ptr(wry)) {
-            void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
-            if (!ok_ptr(wc) && unity_base()) {
-                using F = void* (*)(void*);
-                wc = R<F>(0x162E58C)(wry);
-            }
-            if (ok_ptr(wc)) {
-                void* ns = *(void**)((char*)wc + 0x58);
-                if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                // BHEHACCGBBGGBCH @ 0xE0 / 0xE8 — current & reserve/capacity
-                // struct: int max@0x10, int cur@0x14 (after object header)
-                auto readAmmoObj = [](void* ao, int* cur, int* mx) {
-                    if (!ok_ptr(ao)) return;
-                    int a = *(int*)((char*)ao + 0x14);
-                    int b = *(int*)((char*)ao + 0x10);
-                    if (a >= 0 && a <= 200) *cur = a;
-                    if (b >= 0 && b <= 200) *mx = b;
-                    // sometimes short property path: value in low 16 bits at 0x14
-                    if (*cur < 0) {
-                        short sh = *(short*)((char*)ao + 0x14);
-                        if (sh >= 0 && sh <= 200) *cur = sh;
+        // optional extras — never crash match enter
+        @try {
+            if (g_espHP.load()) s.hp = read_hp01(pc);
+            if (g_espWeapon.load()) {
+                void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
+                if (ok_ptr(wry)) {
+                    void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
+                    if (ok_ptr(wc)) {
+                        void* ns = *(void**)((char*)wc + 0x58);
+                        if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
+                        // skip ammo path for grenades/bomb (not GunController layout)
+                        bool isNade = false;
+                        if (s.weapon[0]) {
+                            // HE, Flash, Smoke, Molotov, Bomb etc.
+                            const char* w = s.weapon;
+                            if (strstr(w, "HE") || strstr(w, "Flash") || strstr(w, "Smoke")
+                                || strstr(w, "Molly") || strstr(w, "Molotov")
+                                || strstr(w, "Bomb") || strstr(w, "Grenade")
+                                || strstr(w, "гранат") || strstr(w, "бомб"))
+                                isNade = true;
+                        }
+                        if (!isNade) {
+                            void* aObj0 = *(void**)((char*)wc + 0xE0);
+                            // BHEHACCGBBGGBCH is a small object — klass check via ok_ptr only
+                            if (ok_ptr(aObj0)) {
+                                int a = *(int*)((char*)aObj0 + 0x14);
+                                int b = *(int*)((char*)aObj0 + 0x10);
+                                if (a >= 0 && a <= 200) s.ammo = a;
+                                if (b >= 0 && b <= 200) s.ammoMax = b;
+                            }
+                        }
                     }
-                };
-                void* aObj0 = *(void**)((char*)wc + 0xE0);
-                void* aObj1 = *(void**)((char*)wc + 0xE8);
-                readAmmoObj(aObj0, &s.ammo, &s.ammoMax);
-                if (s.ammoMax < 0) readAmmoObj(aObj1, &s.ammoMax, &s.ammoMax);
-                // if still empty try ints 0xD8/0xDC as cur only
-                if (s.ammo < 0) {
-                    int a0 = *(int*)((char*)wc + 0xD8);
-                    if (a0 >= 0 && a0 <= 200) s.ammo = a0;
                 }
             }
-        }
-        void* hit = *(void**)((char*)pc + Offsets::PC_hitController);
-        if (ok_ptr(hit)) {
-            float v = *(float*)((char*)hit + 0xD4);
-            if (v == v && v >= 0.f && v <= 100.f) s.armor = v;
-        }
+        } @catch (...) {}
         if (s.local) mines++;
         float d = vdist(p, cpos);
         if (d < bestD) { bestD = d; bestIdx = tmp.size(); }
@@ -349,8 +345,34 @@ static void refresh(void* camTr) {
                         WorldSnap w{};
                         w.pos = pos;
                         w.timer = -1.f;
-                        if (isBomb) snprintf(w.label, sizeof(w.label), "BOMB");
-                        else        snprintf(w.label, sizeof(w.label), "GRENADE");
+                        if (isBomb) {
+                            snprintf(w.label, sizeof(w.label), "BOMB");
+                            @try {
+                                float rem = *(float*)((char*)o + 0xA8);
+                                if (rem == rem && rem >= 0.f && rem <= 60.f) {
+                                    w.timer = rem;
+                                    snprintf(w.label, sizeof(w.label), "BOMB %.0fs", rem);
+                                }
+                            } @catch (...) {}
+                        } else {
+                            snprintf(w.label, sizeof(w.label), "GRENADE");
+                            @try {
+                                // GrenadeParameters often @ 0x18 on DroppedGrenadeController
+                                void* gp = *(void**)((char*)o + 0x18);
+                                if (ok_ptr(gp)) {
+                                    // try common name string offsets on parameters SO
+                                    for (size_t no : {0x10ul, 0x18ul, 0x20ul}) {
+                                        void* ns2 = *(void**)((char*)gp + no);
+                                        char tmpn[20]{};
+                                        if (ok_ptr(ns2)) read_str(ns2, tmpn, sizeof(tmpn));
+                                        if (tmpn[0] && strlen(tmpn) < 18) {
+                                            snprintf(w.label, sizeof(w.label), "%s", tmpn);
+                                            break;
+                                        }
+                                    }
+                                }
+                            } @catch (...) {}
+                        }
                         wtmp.push_back(w);
                         if (wtmp.size() > 12) break;
                     } @catch (...) {}
@@ -375,6 +397,10 @@ static void refresh(void* camTr) {
     if (doWorld || (!g_espBomb.load() && !g_espGrenade.load())) {
         g_world.swap(wtmp);
     }
+  } @catch (...) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_list.clear();
+  }
 
 }
 
@@ -599,60 +625,35 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
 // Never touch nested RecoilParameters* (that crashed).
 // Recoil: ONLY WeaponParameters multipliers — never GunController floats (those caused rapid fire)
 static void apply_recoil(void* localPc) {
+    // SO writes crash on match enter when weapon params shared/not ready.
+    // Percentage recoil: scale AimController residual by writing 0 to runtime
+    // kick floats ONLY on the local AimController instance (not ScriptableObject).
     float pct = g_recoilPct.load();
-    if (!ok_ptr(localPc) || !unity_base()) return;
-
-    // 0% = full recoil (leave SO alone), 100% = zero recoil multipliers
-    static float applied = -1.f;
-    static void* lastParams = nullptr;
-
+    if (pct < 1.f || !ok_ptr(localPc)) return;
     @try {
+        void* aim = *(void**)((char*)localPc + Offsets::PC_aimController);
+        if (!ok_ptr(aim)) return;
+        // soft: if high pct, don't touch SO at all — user still has reduced camera kick
+        // via aim if we later counter. For now only touch if pct>=99: try weapon instance
+        // floats that look like recoil progress (0x3C/0x40 on WeaponController).
         void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
         if (!ok_ptr(wry)) return;
         void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
-        if (!ok_ptr(wc)) {
-            using F = void* (*)(void*);
-            wc = R<F>(0x162E58C)(wry);
-        }
         if (!ok_ptr(wc)) return;
-
-        void* params = *(void**)((char*)wc + 0x118); // GunParameters on GunController
-        if (!ok_ptr(params))
-            params = *(void**)((char*)wc + Offsets::WC_weaponParams);
-        if (!ok_ptr(params)) return;
-
-        if (params == lastParams && fabsf(pct - applied) < 0.25f) return;
-        lastParams = params;
-        applied = pct;
-
-        float mul = 1.f - (pct / 100.f);
-        if (mul < 0.f) mul = 0.f;
-        if (mul > 1.f) mul = 1.f;
-
-        auto setMul = [&](size_t off) {
-            float* f = (float*)((char*)params + off);
-            float v = *f;
-            if (v == v && v >= 0.f && v <= 8.f) *f = mul;
-        };
-        setMul(Offsets::GP_recoilMultCrouch);
-        setMul(Offsets::GP_recoilAimMult);
-        setMul(Offsets::GP_recoilAimCrouch);
-
-        // horizontal/vertical ranges on nested RecoilParameters — absolute small when high %
-        void* rp = *(void**)((char*)params + Offsets::GP_recoilParams);
-        if (ok_ptr(rp)) {
-            auto setRange = [&](size_t off, float base) {
-                float* f = (float*)((char*)rp + off);
-                float v = *f;
-                if (v == v && v >= 0.f && v < 40.f) {
-                    // store absolute scaled from a sane base, not compound
-                    *f = fmaxf(0.01f, base * mul);
-                }
-            };
-            setRange(Offsets::RP_horiz, 1.0f);
-            setRange(Offsets::RP_vert, 1.0f);
-            setRange(Offsets::RP_camDev, 0.5f);
-        }
+        // skip grenade/bomb controllers — different layout, writing = crash on buy
+        void* ns = *(void**)((char*)wc + 0x58);
+        char wname[24]{};
+        if (ok_ptr(ns)) read_str(ns, wname, sizeof(wname));
+        if (wname[0] && (strstr(wname, "HE") || strstr(wname, "Flash")
+            || strstr(wname, "Smoke") || strstr(wname, "Molly")
+            || strstr(wname, "Bomb") || strstr(wname, "Grenade")))
+            return;
+        float keep = 1.f - pct / 100.f;
+        if (keep < 0.f) keep = 0.f;
+        float* f0 = (float*)((char*)wc + 0x3C);
+        float* f1 = (float*)((char*)wc + 0x40);
+        if (*f0 == *f0 && fabsf(*f0) < 20.f) *f0 *= keep;
+        if (*f1 == *f1 && fabsf(*f1) < 20.f) *f1 *= keep;
     } @catch (...) {}
 }
 
@@ -773,39 +774,43 @@ static void run_aim(void* cam, void* camTr) {
 }
 
 void Astral_FeaturesTick() {
-    if (g_esp) {
-        UIView* root = g_esp.superview;
-        if (root) {
-            CGRect b = root.bounds;
-            if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
-            b.origin = CGPointZero;
-            g_esp.frame = b;
+    @try {
+        if (g_esp) {
+            UIView* root = g_esp.superview;
+            if (root) {
+                CGRect b = root.bounds;
+                if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
+                b.origin = CGPointZero;
+                g_esp.frame = b;
+            }
+            [g_esp setNeedsDisplay];
         }
-        [g_esp setNeedsDisplay];
-    }
 
-    bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load() || g_espHP.load() || g_espWeapon.load();
-    bool wantAim = g_aimbot.load();
-    bool wantRec = g_recoilPct.load() > 0.5f;
-    bool wantFov = g_fovDraw.load();
-    if (!wantEsp && !wantAim && !wantRec && !wantFov) return;
-    if (!unity_base()) return;
+        bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load() || g_espHP.load() || g_espWeapon.load() || g_espBomb.load() || g_espGrenade.load();
+        bool wantAim = g_aimbot.load();
+        bool wantRec = g_recoilPct.load() > 0.5f;
+        bool wantFov = g_fovDraw.load();
+        if (!wantEsp && !wantAim && !wantRec && !wantFov) return;
+        if (!unity_base()) return;
 
-    void* cam = main_cam();
-    if (!ok_ptr(cam)) return;
-    void* camTr = get_tr(cam);
-    if (!ok_ptr(camTr)) return;
+        void* cam = main_cam();
+        if (!ok_ptr(cam)) return;
+        void* camTr = get_tr(cam);
+        if (!ok_ptr(camTr)) return;
 
-    if (wantEsp || wantAim || wantRec) {
-        size_t n = 0;
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            n = g_list.size();
+        if (wantEsp || wantAim || wantRec) {
+            size_t n = 0;
+            {
+                std::lock_guard<std::mutex> lk(g_mtx);
+                n = g_list.size();
+            }
+            // slower refresh on empty (match loading)
+            int every = (n == 0) ? 12 : 3;
+            if (n == 0 || ++g_ctr >= every) {
+                g_ctr = 0;
+                refresh(camTr);
+            }
         }
-        if (n == 0 || ++g_ctr >= 3) {
-            g_ctr = 0;
-            refresh(camTr);
-        }
-    }
-    if (wantAim || wantRec) run_aim(cam, camTr);
+        if (wantAim || wantRec) run_aim(cam, camTr);
+    } @catch (...) {}
 }
