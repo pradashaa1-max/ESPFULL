@@ -436,7 +436,7 @@ UIView* g_esp_view(void) { return g_esp; }
     CGFloat H = self.bounds.size.height;
     if (W < 2 || H < 2) return;
 
-    if (g_fovDraw.load()) {
+    if (g_fovDraw.load() && g_aimbot.load()) {
         CGFloat cx = W * 0.5f, cy = H * 0.5f;
         CGFloat side = W < H ? W : H;
         CGFloat r = side * (0.04f + g_fov.load() / 30.f * 0.20f);
@@ -493,7 +493,7 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat top = fminf(fy, hy);
         CGFloat bot = fmaxf(fy, hy);
         CGFloat hgt = bot - top;
-        if (hgt < 10.f) hgt = 36.f;
+        if (hgt < 4.f) continue; // too small / invalid — skip, don't inflate
         CGFloat mid  = (fx + hx) * 0.5f;
         CGFloat wid  = hgt * 0.45f;
         CGFloat left = mid - wid * 0.5f;
@@ -625,22 +625,18 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
 // Never touch nested RecoilParameters* (that crashed).
 // Recoil: ONLY WeaponParameters multipliers — never GunController floats (those caused rapid fire)
 static void apply_recoil(void* localPc) {
-    // SO writes crash on match enter when weapon params shared/not ready.
-    // Percentage recoil: scale AimController residual by writing 0 to runtime
-    // kick floats ONLY on the local AimController instance (not ScriptableObject).
     float pct = g_recoilPct.load();
-    if (pct < 1.f || !ok_ptr(localPc)) return;
+    if (pct < 0.5f || !ok_ptr(localPc) || !unity_base()) return;
+
+    static float lastPct = -999.f;
+    static void* lastParams = nullptr;
+
     @try {
-        void* aim = *(void**)((char*)localPc + Offsets::PC_aimController);
-        if (!ok_ptr(aim)) return;
-        // soft: if high pct, don't touch SO at all — user still has reduced camera kick
-        // via aim if we later counter. For now only touch if pct>=99: try weapon instance
-        // floats that look like recoil progress (0x3C/0x40 on WeaponController).
         void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
         if (!ok_ptr(wry)) return;
         void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
         if (!ok_ptr(wc)) return;
-        // skip grenade/bomb controllers — different layout, writing = crash on buy
+
         void* ns = *(void**)((char*)wc + 0x58);
         char wname[24]{};
         if (ok_ptr(ns)) read_str(ns, wname, sizeof(wname));
@@ -648,12 +644,37 @@ static void apply_recoil(void* localPc) {
             || strstr(wname, "Smoke") || strstr(wname, "Molly")
             || strstr(wname, "Bomb") || strstr(wname, "Grenade")))
             return;
-        float keep = 1.f - pct / 100.f;
-        if (keep < 0.f) keep = 0.f;
-        float* f0 = (float*)((char*)wc + 0x3C);
-        float* f1 = (float*)((char*)wc + 0x40);
-        if (*f0 == *f0 && fabsf(*f0) < 20.f) *f0 *= keep;
-        if (*f1 == *f1 && fabsf(*f1) < 20.f) *f1 *= keep;
+
+        void* params = *(void**)((char*)wc + 0x118);
+        if (!ok_ptr(params))
+            params = *(void**)((char*)wc + Offsets::WC_weaponParams);
+        if (!ok_ptr(params)) return;
+
+        if (params == lastParams && fabsf(pct - lastPct) < 0.5f) return;
+        lastParams = params;
+        lastPct = pct;
+
+        float mul = 1.f - pct / 100.f;
+        if (mul < 0.f) mul = 0.f;
+        if (mul > 1.f) mul = 1.f;
+
+        auto setf = [](void* base, size_t off, float v) {
+            if (!ok_ptr(base)) return;
+            float* f = (float*)((char*)base + off);
+            if (*f == *f && *f >= 0.f && *f <= 8.f) *f = v;
+        };
+        setf(params, Offsets::GP_recoilMultCrouch, mul);
+        setf(params, Offsets::GP_recoilAimMult, mul);
+        setf(params, Offsets::GP_recoilAimCrouch, mul);
+
+        if (pct >= 80.f) {
+            void* rp = *(void**)((char*)params + Offsets::GP_recoilParams);
+            if (ok_ptr(rp)) {
+                setf(rp, Offsets::RP_horiz, 0.05f * mul + 0.01f);
+                setf(rp, Offsets::RP_vert, 0.05f * mul + 0.01f);
+                setf(rp, Offsets::RP_camDev, 0.02f * mul + 0.01f);
+            }
+        }
     } @catch (...) {}
 }
 
@@ -710,17 +731,9 @@ static void run_aim(void* cam, void* camTr) {
             Vec3 bone = {base.x, base.y + boneY, base.z};
             float distTo = vdist(cpos, bone);
 
-            if (g_aimVisible.load() && unity_base() && distTo > 1.5f) {
-                @try {
-                    RayHit hit{};
-                    Vec3 from = cpos; from.y += 0.2f;
-                    Vec3 dir = vnorm(vsub(bone, from));
-                    using RC = bool (*)(Vec3*, Vec3*, RayHit*, float, int);
-                    bool hitSomething = R<RC>(0x336DFBC)(&from, &dir, &hit, distTo - 0.3f, ~0);
-                    if (hitSomething && hit.distance + 0.6f < distTo)
-                        continue;
-                } @catch (...) {}
-            }
+            // Physics.Raycast disabled — was crashing; visible uses simple depth for now
+            (void)distTo;
+            (void)g_aimVisible;
 
             Vec3 sc = w2s(cam, bone);
             if (sc.z < 0.05f) continue;
