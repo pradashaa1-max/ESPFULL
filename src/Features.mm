@@ -82,12 +82,9 @@ static Vec3 get_pos(void* tr) {
 // forward via get_rotation + basis is heavy; use get_forward public (returns via register/stack)
 // Safer: compute from LookAt target direction only when needed. For FOV aim use camera transform position delta.
 static Vec3 get_fwd(void* tr) {
-    if (!tr || !unity_base()) return {0,0,1};
-    // get_forward may use inject under the hood; call public and hope ABI —
-    // fallback: approximate from two positions is not available, return +Z
-    using fn_t = Vec3 (*)(void*);
-    // Public get_forward at 0x3323DD8 — on ARM64 returns Vec3 in registers
-    return RVA<fn_t>(Offsets::Transform_get_forward)(tr);
+    // Avoid public get_forward ABI issues — use identity forward; aim uses position delta
+    (void)tr;
+    return {0, 0, 1};
 }
 
 static void* main_camera() {
@@ -172,9 +169,11 @@ static void read_il2cpp_string(void* strObj, char* out, size_t outLen) {
     out[n] = 0;
 }
 
+static bool unity_alive(void* obj);
+
 static void read_nick(void* pc, char* out, size_t outLen) {
     out[0] = 0;
-    if (!pc) { snprintf(out, outLen, "Enemy"); return; }
+    if (!pc || !unity_alive(pc)) { snprintf(out, outLen, "Enemy"); return; }
     void* pp = *(void**)((char*)pc + Offsets::PC_photonPlayer);
     if (!pp) { snprintf(out, outLen, "Enemy"); return; }
     void* nameStr = *(void**)((char*)pp + Offsets::PP_nameField);
@@ -202,114 +201,136 @@ static void read_weapon(void* pc, char* out, size_t outLen, int* ammo) {
     }
 }
 
+// Unity object alive? (Il2Cpp Object.m_CachedPtr at +0x10)
+static bool unity_alive(void* obj) {
+    if (!obj) return false;
+    // rough alignment check
+    if (((uintptr_t)obj & 0x7) != 0) return false;
+    void* native = *(void**)((char*)obj + 0x10);
+    return native != nullptr;
+}
+
 static std::vector<void*> find_players_raw() {
     std::vector<void*> out;
     auto& api = IL2CPP();
     if (!api.ready && !api.init()) return out;
-    if (!api.class_get_type || !api.type_get_object) return out;
+    if (!api.runtime_invoke) return out;
 
-    Il2CppClass* pcKlass = api.find_class("Axlebolt.Standoff.Player", "PlayerController");
-    if (!pcKlass) pcKlass = api.find_class("", "PlayerController");
-    if (!pcKlass) pcKlass = api.find_class("Assembly-CSharp", "PlayerController");
-    if (!pcKlass) return out;
-
-    Il2CppClass* objKlass = api.find_class("UnityEngine", "Object");
-    if (!objKlass) return out;
-    const MethodInfo* findMethod = api.find_method(objKlass, "FindObjectsOfType", 1);
-    if (!findMethod) return out;
-
-    const Il2CppType* type = api.class_get_type(pcKlass);
-    if (!type) return out;
-    Il2CppObject* typeObj = api.type_get_object(type);
-    if (!typeObj) return out;
-
-    void* args[1] = { typeObj };
-    void* exc = nullptr;
-    Il2CppObject* arrObj = api.runtime_invoke(findMethod, nullptr, args, &exc);
-    if (exc || !arrObj) return out;
-
-    auto* arr = (Il2CppArraySimple*)arrObj;
-    uintptr_t len = arr->max_length;
-    if (api.array_length) len = api.array_length(arrObj);
-    if (len > 64) len = 64;
-    for (uintptr_t i = 0; i < len; i++) {
-        void* obj = arr->vector[i];
-        if (obj) out.push_back(obj);
-    }
-    if (!out.empty()) return out;
-
-    // Fallback: PlayerManager instance hashset @ +0x28
+    // Preferred: PlayerManager.HashSet via property — no FindObjectsOfType (crashes on load)
     Il2CppClass* pmKlass = api.find_class("Axlebolt.Standoff.Player", "PlayerManager");
-    if (!pmKlass) pmKlass = api.find_class("", "PlayerManager");
-    if (pmKlass) {
-        // try static Instance / get_Instance
-        const MethodInfo* getInst = api.find_method(pmKlass, "get_Instance", 0);
-        if (!getInst) getInst = api.find_method(pmKlass, "get_instance", 0);
-        if (getInst && api.runtime_invoke) {
-            void* exc = nullptr;
-            Il2CppObject* inst = api.runtime_invoke(getInst, nullptr, nullptr, &exc);
-            if (!exc && inst) {
-                void* hs = *(void**)((char*)inst + 0x28); // HashSet field
-                // HashSet layout: Object + count-related; last-resort scan pointers in range
-                if (hs) {
-                    // _slots / _entries vary; soft scan nearby object pointers
-                    for (size_t off = 0x10; off < 0x40; off += sizeof(void*)) {
-                        void* maybe = *(void**)((char*)hs + off);
-                        (void)maybe;
-                    }
-                }
-                // also try dict at 0x20 values via FindObjects already primary
-            }
+    if (!pmKlass) return out;
+
+    // LazySingleton<object>.get_HGGHFBCAGEEGBDH → Instance
+    const MethodInfo* getInst = api.find_method(pmKlass, "get_HGGHFBCAGEEGBDH", 0);
+    if (!getInst) getInst = api.find_method(pmKlass, "get_Instance", 0);
+    if (!getInst) getInst = api.find_method(pmKlass, "GHAFGAACAEHABEF", 0);
+
+    void* exc = nullptr;
+    Il2CppObject* inst = nullptr;
+    if (getInst) {
+        inst = api.runtime_invoke(getInst, nullptr, nullptr, &exc);
+        if (exc) return out;
+    }
+    if (!inst || !unity_alive(inst)) {
+        // fallback: static field on LazySingleton at 0x0 in type statics — skip if no method
+        return out;
+    }
+
+    // HashSet property get_CEADFCHEEGGGDHC
+    const MethodInfo* getHs = api.find_method(pmKlass, "get_CEADFCHEEGGGDHC", 0);
+    Il2CppObject* hsObj = nullptr;
+    if (getHs) {
+        exc = nullptr;
+        hsObj = api.runtime_invoke(getHs, inst, nullptr, &exc);
+        if (exc) hsObj = nullptr;
+    }
+    if (!hsObj) {
+        // field at +0x28
+        hsObj = *(Il2CppObject**)((char*)inst + Offsets::PM_hashset);
+    }
+    if (!hsObj || !unity_alive(hsObj)) return out;
+
+    // HashSet`1 IL2CPP layout (approximate):
+    // 0x10: _buckets, 0x18: _slots, 0x20: _count (int), ...
+    // slots is array of Slot { hashCode, next, value }
+    int count = *(int*)((char*)hsObj + 0x20);
+    if (count <= 0 || count > 32) {
+        // try alternate count offset
+        count = *(int*)((char*)hsObj + 0x18);
+        if (count <= 0 || count > 32) return out;
+    }
+
+    void* slots = *(void**)((char*)hsObj + 0x18); // may be _slots
+    if (!slots) slots = *(void**)((char*)hsObj + 0x10);
+    if (!slots) return out;
+
+    // Il2CppArray: max_length at +0x18, vector at +0x20
+    auto* arr = (Il2CppArraySimple*)slots;
+    uintptr_t len = arr->max_length;
+    if (len > 128) len = 128;
+
+    // Slot size often 0x18 on 64-bit: int hash, int next, object value  — or 0x10
+    // Safer: scan pointer-aligned words in slots array payload for alive PlayerControllers
+    // Payload starts at vector[0]
+    uintptr_t bytes = len * 24; // over-read bound
+    if (bytes > 0x2000) bytes = 0x2000;
+    uint8_t* base = (uint8_t*)&arr->vector[0];
+    for (uintptr_t off = 0; off + 8 <= bytes && out.size() < 24; off += 8) {
+        void* cand = *(void**)(base + off);
+        if (!unity_alive(cand)) continue;
+        // must look like a managed object with transform field
+        void* tr = *(void**)((char*)cand + Offsets::PC_transform);
+        if (!unity_alive(tr) && !tr) continue;
+        if (tr && unity_alive(tr)) {
+            // avoid dups
+            bool dup = false;
+            for (void* e : out) if (e == cand) { dup = true; break; }
+            if (!dup) out.push_back(cand);
         }
     }
     return out;
 }
 
 static void refresh_players(void* camTr) {
+    std::vector<PSnap> tmp;
+    if (!camTr || !unity_alive(camTr)) {
+        std::lock_guard<std::mutex> lk(g_plist_mtx);
+        g_plist.swap(tmp);
+        return;
+    }
+
     auto raw = find_players_raw();
-    Vec3 camPos = camTr ? get_pos(camTr) : Vec3{};
+    Vec3 camPos = get_pos(camTr);
+
     void* local = nullptr;
     float bestD = 1e9f;
     for (void* pc : raw) {
+        if (!unity_alive(pc)) continue;
         void* tr = pc_transform(pc);
-        if (!tr) continue;
+        if (!tr || !unity_alive(tr)) continue;
         float d = vdist(get_pos(tr), camPos);
         if (d < bestD) { bestD = d; local = pc; }
     }
-    if (bestD > 8.f) local = nullptr;
+    if (bestD > 15.f) local = nullptr;
 
-    std::vector<PSnap> tmp;
     tmp.reserve(raw.size());
     for (void* pc : raw) {
+        if (!unity_alive(pc)) continue;
         void* tr = pc_transform(pc);
-        if (!tr) continue;
+        if (!tr || !unity_alive(tr)) continue;
         PSnap s{};
-        s.obj   = pc;
-        s.tr    = tr;
-        s.pos   = get_pos(tr);
-        s.team  = get_team(pc);
+        s.obj = pc;
+        s.tr = tr;
+        s.pos = get_pos(tr);
+        // sanity: position not NaN / insane
+        if (s.pos.x != s.pos.x || fabsf(s.pos.x) > 100000.f) continue;
+        s.team = get_team(pc);
         s.local = (pc == local);
-        s.hp    = 100.f;
-        s.dead  = false;
-        s.ammo  = -1;
+        s.hp = 100.f;
+        s.dead = false;
+        s.ammo = -1;
         read_nick(pc, s.name, sizeof(s.name));
         read_weapon(pc, s.weapon, sizeof(s.weapon), &s.ammo);
-
-        void* hit = *(void**)((char*)pc + Offsets::PC_hitController);
-        if (hit) {
-            for (size_t off = 0x10; off <= 0xE0; off += 4) {
-                float h = *(float*)((char*)hit + off);
-                if (h > 0.5f && h <= 100.5f) { s.hp = h; break; }
-            }
-        }
-        void* net = *(void**)((char*)pc + 0x98);
-        if (net && s.hp >= 99.f) {
-            for (size_t off = 0x10; off <= 0x80; off += 4) {
-                float h = *(float*)((char*)net + off);
-                if (h > 0.5f && h < 100.5f) { s.hp = h; break; }
-            }
-        }
-        s.dead = s.hp <= 0.5f;
         tmp.push_back(s);
     }
     std::lock_guard<std::mutex> lk(g_plist_mtx);
@@ -594,7 +615,7 @@ static void run_aim(void* cam, void* camTr, CGSize scr) {
 
     void* bestTr = nullptr;
     Vec3  bestBone{};
-    float bestAng = maxFov;
+    float bestAng = 9999.f;
 
     int localTeam = -1;
     {
@@ -610,10 +631,11 @@ static void run_aim(void* cam, void* camTr, CGSize scr) {
             Vec3 bone = vadd(p.pos, {0, bh, 0});
 
             Vec3 dir = vnorm(vsub(bone, camPos));
-            float c = fmaxf(-1.f, fminf(1.f, vdot(dir, camFwd)));
-            float ang = acosf(c) * 57.2957795f;
-            if (ang < bestAng) {
-                bestAng = ang;
+            // Prefer closest in world within FOV radius estimate
+            float dist = vdist(bone, camPos);
+            float score = dist; // lower better
+            if (score < bestAng) {
+                bestAng = score;
                 bestTr = p.tr;
                 bestBone = bone;
             }
@@ -654,15 +676,13 @@ extern "C" bool Astral_GetSilentDir(float* x, float* y, float* z) {
 
 // ─── Frame tick ──────────────────────────────────────────────────────────────
 void Astral_FeaturesTick() {
-    // UI path only — always safe
+    // Always refresh ESP view frame / FOV draw
     if (g_espView) {
         UIView* root = g_espView.superview;
         if (root) {
             CGRect b = root.bounds;
-            if (b.size.width < 2 && root.superview)
-                b = root.superview.bounds;
-            if (b.size.width < 2)
-                b = UIScreen.mainScreen.bounds;
+            if (b.size.width < 2 && root.superview) b = root.superview.bounds;
+            if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
             b.origin = CGPointZero;
             g_espView.frame = b;
             g_espView.userInteractionEnabled = NO;
@@ -670,34 +690,33 @@ void Astral_FeaturesTick() {
         [g_espView setNeedsDisplay];
     }
 
-    // NO Unity/IL2CPP until user actually enables a feature
-    bool needGame = g_espBox.load() || g_espSkel.load() || g_espName.load()
-                 || g_espHP.load() || g_espWeapon.load() || g_espDist.load()
-                 || g_aimbot.load() || g_silent.load();
-    if (!needGame) return;
-
+    bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load()
+                || g_espHP.load() || g_espWeapon.load() || g_espDist.load();
+    bool wantAim = g_aimbot.load() || g_silent.load();
+    if (!wantEsp && !wantAim) return;
     if (!unity_base()) return;
-    if (!U().init()) return;
 
     void* cam = main_camera();
-    if (!cam) return;
+    if (!cam || !unity_alive(cam)) return;
     void* camTr = component_transform(cam);
-    if (!camTr) return;
+    if (!camTr || !unity_alive(camTr)) return;
 
-    // Require stable camera for 2 seconds before scanning (map load crash fix)
     static int stable = 0;
     static void* lastCam = nullptr;
     if (cam != lastCam) { stable = 0; lastCam = cam; }
     stable++;
-    if (stable < 120) return; // ~2s at 60fps
+    if (stable < 90) return; // ~1.5s
 
-    if (++g_refresh_ctr >= 30) {
-        g_refresh_ctr = 0;
-        refresh_players(camTr);
+    if (wantEsp || wantAim) {
+        if (++g_refresh_ctr >= 25) {
+            g_refresh_ctr = 0;
+            refresh_players(camTr);
+        }
     }
 
-    CGSize scr = g_espView ? g_espView.bounds.size : UIScreen.mainScreen.bounds.size;
-    if (scr.width < 2) return;
-    if (g_aimbot.load() || g_silent.load())
-        run_aim(cam, camTr, scr);
+    if (wantAim) {
+        CGSize scr = g_espView ? g_espView.bounds.size : UIScreen.mainScreen.bounds.size;
+        if (scr.width > 2)
+            run_aim(cam, camTr, scr);
+    }
 }
