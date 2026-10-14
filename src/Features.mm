@@ -51,7 +51,7 @@ static Vec4 quat_look(Vec3 from, Vec3 to) {
     return q;
 }
 
-// ─── Unity base + RVA ────────────────────────────────────────────────────────
+// ─── Unity via IL2CPP only (no hardcoded RVAs → no crash on version mismatch) ─
 static uintptr_t g_unity = 0;
 static uintptr_t unity_base() {
     if (g_unity) return g_unity;
@@ -59,47 +59,104 @@ static uintptr_t unity_base() {
     for (uint32_t i = 0; i < n; i++) {
         const char* name = _dyld_get_image_name(i);
         if (!name) continue;
-        if (strstr(name, "UnityFramework") || strstr(name, "UnityFramework.framework")) {
+        if (strstr(name, "UnityFramework")) {
             g_unity = (uintptr_t)_dyld_get_image_header(i);
             break;
         }
     }
     return g_unity;
 }
-template<typename Fn> static Fn RVA(uint64_t off) {
-    return (Fn)(unity_base() + off);
+
+struct UnityFns {
+    const MethodInfo* cam_main = nullptr;
+    const MethodInfo* get_pos = nullptr;
+    const MethodInfo* get_fwd = nullptr;
+    const MethodInfo* get_tr = nullptr;
+    const MethodInfo* w2s = nullptr;
+    const MethodInfo* look_at = nullptr;
+    bool ready = false;
+
+    bool init() {
+        if (ready) return true;
+        auto& api = IL2CPP();
+        if (!api.ready && !api.init()) return false;
+        Il2CppClass* camK = api.find_class("UnityEngine", "Camera");
+        Il2CppClass* trK  = api.find_class("UnityEngine", "Transform");
+        Il2CppClass* compK= api.find_class("UnityEngine", "Component");
+        if (!camK || !trK || !compK) return false;
+        cam_main = api.find_method(camK, "get_main", 0);
+        get_pos  = api.find_method(trK, "get_position", 0);
+        get_fwd  = api.find_method(trK, "get_forward", 0);
+        get_tr   = api.find_method(compK, "get_transform", 0);
+        w2s      = api.find_method(camK, "WorldToScreenPoint", 1);
+        look_at  = api.find_method(trK, "LookAt", 1);
+        // LookAt(Vector3) might be argc 1; some builds use LookAt(Transform)
+        if (!look_at) look_at = api.find_method(trK, "LookAt", 2);
+        ready = (cam_main && get_pos && get_tr && w2s);
+        return ready;
+    }
+};
+static UnityFns& U() { static UnityFns u; return u; }
+
+static Vec3 unbox_vec3(Il2CppObject* obj) {
+    if (!obj) return {};
+    auto& api = IL2CPP();
+    if (!api.object_unbox) return {};
+    float* p = (float*)api.object_unbox(obj);
+    if (!p) return {};
+    return {p[0], p[1], p[2]};
 }
 
-using get_position_t    = Vec3  (*)(void*);
-using set_rotation_t    = void  (*)(void*, Vec4);
-using cam_main_t        = void* (*)();
-using world_to_screen_t = Vec3  (*)(void*, Vec3);
-using get_transform_t   = void* (*)(void*);
-using look_at_t         = void  (*)(void*, Vec3);
-using get_forward_t     = Vec3  (*)(void*);
+static void* main_camera() {
+    if (!U().init() || !U().cam_main) return nullptr;
+    void* exc = nullptr;
+    Il2CppObject* o = IL2CPP().runtime_invoke(U().cam_main, nullptr, nullptr, &exc);
+    if (exc) return nullptr;
+    return o;
+}
+
+static void* component_transform(void* c) {
+    if (!c || !U().init() || !U().get_tr) return nullptr;
+    void* exc = nullptr;
+    Il2CppObject* o = IL2CPP().runtime_invoke(U().get_tr, (Il2CppObject*)c, nullptr, &exc);
+    if (exc) return nullptr;
+    return o;
+}
 
 static Vec3 get_pos(void* tr) {
-    if (!tr || !unity_base()) return {};
-    return RVA<get_position_t>(Offsets::Transform_get_position)(tr);
-}
-static Vec3 get_fwd(void* tr) {
-    if (!tr || !unity_base()) return {0,0,1};
-    return RVA<get_forward_t>(Offsets::Transform_get_forward)(tr);
-}
-static void* main_camera() {
-    if (!unity_base()) return nullptr;
-    return RVA<cam_main_t>(Offsets::Camera_get_main)();
-}
-static void* component_transform(void* c) {
-    if (!c || !unity_base()) return nullptr;
-    return RVA<get_transform_t>(Offsets::Component_get_transform)(c);
-}
-static Vec3 w2s(void* cam, Vec3 w) {
-    if (!cam || !unity_base()) return {};
-    return RVA<world_to_screen_t>(Offsets::Camera_WorldToScreenPoint)(cam, w);
+    if (!tr || !U().init() || !U().get_pos) return {};
+    void* exc = nullptr;
+    Il2CppObject* o = IL2CPP().runtime_invoke(U().get_pos, (Il2CppObject*)tr, nullptr, &exc);
+    if (exc || !o) return {};
+    return unbox_vec3(o);
 }
 
-// ─── Player list (cached, refreshed every N ticks) ───────────────────────────
+static Vec3 get_fwd(void* tr) {
+    if (!tr || !U().init() || !U().get_fwd) return {0,0,1};
+    void* exc = nullptr;
+    Il2CppObject* o = IL2CPP().runtime_invoke(U().get_fwd, (Il2CppObject*)tr, nullptr, &exc);
+    if (exc || !o) return {0,0,1};
+    return unbox_vec3(o);
+}
+
+static Vec3 w2s(void* cam, Vec3 world) {
+    if (!cam || !U().init() || !U().w2s) return {};
+    // WorldToScreenPoint takes Vector3 by value — need boxed or raw depending on ABI
+    // IL2CPP runtime_invoke for value-type args: pass pointer to value
+    void* exc = nullptr;
+    void* args[1] = { &world };
+    Il2CppObject* o = IL2CPP().runtime_invoke(U().w2s, (Il2CppObject*)cam, args, &exc);
+    if (exc || !o) return {};
+    return unbox_vec3(o);
+}
+
+static void look_at_safe(void* tr, Vec3 worldPoint) {
+    if (!tr || !U().init() || !U().look_at) return;
+    void* exc = nullptr;
+    void* args[1] = { &worldPoint };
+    IL2CPP().runtime_invoke(U().look_at, (Il2CppObject*)tr, args, &exc);
+}
+
 struct PSnap {
     void* obj;
     void* tr;
@@ -149,14 +206,7 @@ static void read_nick(void* pc, char* out, size_t outLen) {
         read_il2cpp_string(nameStr, out, outLen);
         if (out[0]) return;
     }
-    if (unity_base()) {
-        using get_nick_t = void* (*)(void*);
-        void* s = RVA<get_nick_t>(Offsets::PhotonPlayer_get_NickName)(pp);
-        if (s) {
-            read_il2cpp_string(s, out, outLen);
-            if (out[0]) return;
-        }
-    }
+    // nick via nameField only — no raw RVA
     snprintf(out, outLen, "Enemy");
 }
 
@@ -615,7 +665,7 @@ static void run_aim(void* cam, void* camTr, CGSize scr) {
         Vec3 blended = vnorm({cur.x+(tgt.x-cur.x)*t, cur.y+(tgt.y-cur.y)*t, cur.z+(tgt.z-cur.z)*t});
         Vec3 lookAt = vadd(camPos, vmul(blended, 10.f));
         // prefer LookAt — more stable than raw quat write on this build
-        RVA<look_at_t>(Offsets::Transform_LookAt)(camTr, lookAt);
+        look_at_safe(camTr, lookAt);
     }
 }
 
@@ -628,38 +678,57 @@ extern "C" bool Astral_GetSilentDir(float* x, float* y, float* z) {
 
 // ─── Frame tick ──────────────────────────────────────────────────────────────
 void Astral_FeaturesTick() {
-    // Always keep ESP full-screen + redraw
+    // UI always safe — no native Unity calls
     if (g_espView) {
         UIView* root = g_espView.superview;
         if (root) {
-            // If parent is secure container, expand it to fill the host window
-            UIView* host = root.superview;
-            while (host && ![host isKindOfClass:[UIWindow class]] && host.superview)
-                host = host.superview;
-            CGRect b = host ? host.bounds : root.bounds;
+            UIView* host = root;
+            while (host.superview) host = host.superview;
+            CGRect b = host.bounds;
             if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
             b.origin = CGPointZero;
-            if (root != host && host)
-                root.frame = b;
+            if (root != host) root.frame = b;
             g_espView.frame = b;
+            g_espView.userInteractionEnabled = NO;
         }
         [g_espView setNeedsDisplay];
     }
 
     if (!unity_base()) return;
+    if (!U().init()) return;
 
-    void* cam = main_camera();
-    void* camTr = cam ? component_transform(cam) : nullptr;
+    void* cam = nullptr;
+    void* camTr = nullptr;
+    @try {
+        cam = main_camera();
+        if (cam) camTr = component_transform(cam);
+    } @catch (id e) {
+        return;
+    }
+    if (!cam || !camTr) return;
 
-    if (++g_refresh_ctr >= 12) {
+    // Wait ~1s of stable camera before any player scan (avoids crash on match load)
+    static int stable = 0;
+    stable++;
+    if (stable < 60) return;
+
+    if (++g_refresh_ctr >= 20) {
         g_refresh_ctr = 0;
-        refresh_players(camTr);
+        @try {
+            refresh_players(camTr);
+        } @catch (id e) {
+            // swallow
+        }
     }
 
     CGSize scr = UIScreen.mainScreen.bounds.size;
-    if (scr.height > scr.width)
-        scr = CGSizeMake(scr.height, scr.width);
+    if (scr.height > scr.width) scr = CGSizeMake(scr.height, scr.width);
     if (g_espView && g_espView.bounds.size.width > 10)
         scr = g_espView.bounds.size;
-    run_aim(cam, camTr, scr);
+
+    if (g_aimbot.load() || g_silent.load()) {
+        @try {
+            run_aim(cam, camTr, scr);
+        } @catch (id e) {}
+    }
 }

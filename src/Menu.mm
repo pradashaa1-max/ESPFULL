@@ -15,8 +15,8 @@ extern void Astral_EnsureFOVOverlay(UIWindow* win);
 UIView* Astral_SecureRoot = nil;
 
 // ─── State ───────────────────────────────────────────────────────────────────
-std::atomic<bool>  g_aimbot{true};
-std::atomic<bool>  g_silent{true};
+std::atomic<bool>  g_aimbot{false};
+std::atomic<bool>  g_silent{false};
 std::atomic<bool>  g_fovDraw{true};
 std::atomic<bool>  g_espBox{true};
 std::atomic<bool>  g_espSkel{true};
@@ -566,7 +566,15 @@ static void buildFab(UIView* host) {
 
     buildPanel(root);
     buildFab(root);
-    applyHideRec(root);
+    // Delay secure-field until game is stable (prevents crash on match load)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0*NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (g_hostWin) {
+            UIView* r = g_hostWin.rootViewController.view ?: (UIView*)g_hostWin;
+            applyHideRec(r);
+        }
+    });
+    Astral_SecureRoot = nil; // FOV/ESP on normal root until hide applies
     Astral_EnsureFOVOverlay(key);
 
     if (g_panel) [root bringSubviewToFront:g_panel];
