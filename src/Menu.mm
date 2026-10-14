@@ -140,63 +140,69 @@ static NSArray<UIButton*>* g_tabBtns = nil;
 
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
 static void applyHideRec(UIView* root) {
-    // root = OVERLAY root only — never the game window.
-    // Secure UITextField on Unity's view crashes on map load.
+    // Overlay root only. Everything (ESP + FAB + panel) goes inside secure
+    // so screen recording / screenshots show black where the cheat UI is.
     if (!root) return;
     BOOL on = g_hideRec.load();
-
-    if (g_panel && g_panel.superview != root) {
-        [g_panel removeFromSuperview];
-        [root addSubview:g_panel];
-    }
-    if (g_fab && g_fab.superview != root) {
-        [g_fab removeFromSuperview];
-        [root addSubview:g_fab];
-    }
 
     if (on) {
         if (!g_secureField) {
             g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
             g_secureField.secureTextEntry = YES;
-            g_secureField.userInteractionEnabled = NO;
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         }
         g_secureField.frame = root.bounds;
-        g_secureField.userInteractionEnabled = NO;
+        // YES so children (menu/fab) can receive touches; ACW.pointInside still
+        // filters to panel/fab only so Google/game are fine.
+        g_secureField.userInteractionEnabled = YES;
         if (g_secureField.superview != root)
             [root insertSubview:g_secureField atIndex:0];
-        else
-            [root sendSubviewToBack:g_secureField];
 
-        // Force layout so secure container exists
         [g_secureField layoutIfNeeded];
         UIView* container = nil;
         for (UIView* s in g_secureField.subviews) {
-            s.userInteractionEnabled = NO;
-            if (!container && s.bounds.size.width >= root.bounds.size.width - 1)
-                container = s;
+            if (s.bounds.size.width >= root.bounds.size.width * 0.9) {
+                container = s; break;
+            }
         }
         if (!container) {
-            // create dedicated host inside field
             container = [[UIView alloc] initWithFrame:root.bounds];
-            container.userInteractionEnabled = NO;
             container.backgroundColor = UIColor.clearColor;
             container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [g_secureField addSubview:container];
         }
         container.frame = root.bounds;
-        container.userInteractionEnabled = NO;
+        container.userInteractionEnabled = YES;
         Astral_SecureRoot = container;
+
+        // Move panel + FAB + ESP into secure container → hidden on recording
+        if (g_panel && g_panel.superview != container) {
+            [g_panel removeFromSuperview];
+            [container addSubview:g_panel];
+        }
+        if (g_fab && g_fab.superview != container) {
+            [g_fab removeFromSuperview];
+            [container addSubview:g_fab];
+        }
     } else {
         Astral_SecureRoot = nil;
+        // Move chrome back to overlay root
+        if (g_panel && g_panel.superview != root) {
+            [g_panel removeFromSuperview];
+            [root addSubview:g_panel];
+        }
+        if (g_fab && g_fab.superview != root) {
+            [g_fab removeFromSuperview];
+            [root addSubview:g_fab];
+        }
         if (g_secureField) {
             [g_secureField removeFromSuperview];
             g_secureField = nil;
         }
     }
-    if (g_panel) [root bringSubviewToFront:g_panel];
-    if (g_fab)   [root bringSubviewToFront:g_fab];
+    if (g_panel) [g_panel.superview bringSubviewToFront:g_panel];
+    if (g_fab)   [g_fab.superview bringSubviewToFront:g_fab];
     Astral_EnsureFOVOverlay(g_hostWin);
 }
 

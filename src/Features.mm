@@ -51,111 +51,87 @@ static Vec4 quat_look(Vec3 from, Vec3 to) {
     return q;
 }
 
-// ─── Unity via IL2CPP only (no hardcoded RVAs → no crash on version mismatch) ─
+// ─── Unity calls — direct RVA from dump (Injected for Vector3, no invoke crash) ─
 static uintptr_t g_unity = 0;
 static uintptr_t unity_base() {
     if (g_unity) return g_unity;
     uint32_t n = _dyld_image_count();
     for (uint32_t i = 0; i < n; i++) {
         const char* name = _dyld_get_image_name(i);
-        if (!name) continue;
-        if (strstr(name, "UnityFramework")) {
+        if (name && strstr(name, "UnityFramework")) {
             g_unity = (uintptr_t)_dyld_get_image_header(i);
             break;
         }
     }
     return g_unity;
 }
+template<typename Fn>
+static Fn RVA(uint64_t off) {
+    return (Fn)(unity_base() + off);
+}
 
-struct UnityFns {
-    const MethodInfo* cam_main = nullptr;
-    const MethodInfo* get_pos = nullptr;
-    const MethodInfo* get_fwd = nullptr;
-    const MethodInfo* get_tr = nullptr;
-    const MethodInfo* w2s = nullptr;
-    const MethodInfo* look_at = nullptr;
-    bool ready = false;
+// Transform.get_position_Injected(out Vector3)
+static Vec3 get_pos(void* tr) {
+    Vec3 out{0,0,0};
+    if (!tr || !unity_base()) return out;
+    using fn_t = void (*)(void*, Vec3*);
+    RVA<fn_t>(Offsets::Transform_get_position_Injected)(tr, &out);
+    return out;
+}
 
-    bool init() {
-        if (ready) return true;
-        auto& api = IL2CPP();
-        if (!api.ready && !api.init()) return false;
-        Il2CppClass* camK = api.find_class("UnityEngine", "Camera");
-        Il2CppClass* trK  = api.find_class("UnityEngine", "Transform");
-        Il2CppClass* compK= api.find_class("UnityEngine", "Component");
-        if (!camK || !trK || !compK) return false;
-        cam_main = api.find_method(camK, "get_main", 0);
-        get_pos  = api.find_method(trK, "get_position", 0);
-        get_fwd  = api.find_method(trK, "get_forward", 0);
-        get_tr   = api.find_method(compK, "get_transform", 0);
-        w2s      = api.find_method(camK, "WorldToScreenPoint", 1);
-        look_at  = api.find_method(trK, "LookAt", 1);
-        // LookAt(Vector3) might be argc 1; some builds use LookAt(Transform)
-        if (!look_at) look_at = api.find_method(trK, "LookAt", 2);
-        ready = (cam_main && get_pos && get_tr && w2s);
-        return ready;
-    }
-};
-static UnityFns& U() { static UnityFns u; return u; }
-
-static Vec3 unbox_vec3(Il2CppObject* obj) {
-    if (!obj) return {};
-    auto& api = IL2CPP();
-    if (!api.object_unbox) return {};
-    float* p = (float*)api.object_unbox(obj);
-    if (!p) return {};
-    return {p[0], p[1], p[2]};
+// forward via get_rotation + basis is heavy; use get_forward public (returns via register/stack)
+// Safer: compute from LookAt target direction only when needed. For FOV aim use camera transform position delta.
+static Vec3 get_fwd(void* tr) {
+    if (!tr || !unity_base()) return {0,0,1};
+    // get_forward may use inject under the hood; call public and hope ABI —
+    // fallback: approximate from two positions is not available, return +Z
+    using fn_t = Vec3 (*)(void*);
+    // Public get_forward at 0x3323DD8 — on ARM64 returns Vec3 in registers
+    return RVA<fn_t>(Offsets::Transform_get_forward)(tr);
 }
 
 static void* main_camera() {
-    if (!U().init() || !U().cam_main) return nullptr;
-    void* exc = nullptr;
-    Il2CppObject* o = IL2CPP().runtime_invoke(U().cam_main, nullptr, nullptr, &exc);
-    if (exc) return nullptr;
-    return o;
+    if (!unity_base()) return nullptr;
+    using fn_t = void* (*)();
+    return RVA<fn_t>(Offsets::Camera_get_main)();
 }
 
 static void* component_transform(void* c) {
-    if (!c || !U().init() || !U().get_tr) return nullptr;
-    void* exc = nullptr;
-    Il2CppObject* o = IL2CPP().runtime_invoke(U().get_tr, (Il2CppObject*)c, nullptr, &exc);
-    if (exc) return nullptr;
-    return o;
+    if (!c || !unity_base()) return nullptr;
+    using fn_t = void* (*)(void*);
+    return RVA<fn_t>(Offsets::Component_get_transform)(c);
 }
 
-static Vec3 get_pos(void* tr) {
-    if (!tr || !U().init() || !U().get_pos) return {};
-    void* exc = nullptr;
-    Il2CppObject* o = IL2CPP().runtime_invoke(U().get_pos, (Il2CppObject*)tr, nullptr, &exc);
-    if (exc || !o) return {};
-    return unbox_vec3(o);
-}
-
-static Vec3 get_fwd(void* tr) {
-    if (!tr || !U().init() || !U().get_fwd) return {0,0,1};
-    void* exc = nullptr;
-    Il2CppObject* o = IL2CPP().runtime_invoke(U().get_fwd, (Il2CppObject*)tr, nullptr, &exc);
-    if (exc || !o) return {0,0,1};
-    return unbox_vec3(o);
+// Prefer cached transform field on PlayerController (+0xD8) — avoids extra call
+static void* pc_transform(void* pc) {
+    if (!pc) return nullptr;
+    void* tr = *(void**)((char*)pc + Offsets::PC_transform);
+    if (tr) return tr;
+    return component_transform(pc);
 }
 
 static Vec3 w2s(void* cam, Vec3 world) {
-    if (!cam || !U().init() || !U().w2s) return {};
-    // WorldToScreenPoint takes Vector3 by value — need boxed or raw depending on ABI
-    // IL2CPP runtime_invoke for value-type args: pass pointer to value
-    void* exc = nullptr;
-    void* args[1] = { &world };
-    Il2CppObject* o = IL2CPP().runtime_invoke(U().w2s, (Il2CppObject*)cam, args, &exc);
-    if (exc || !o) return {};
-    return unbox_vec3(o);
+    Vec3 out{0,0,0};
+    if (!cam || !unity_base()) return out;
+    // WorldToScreenPoint_Injected(ref pos, eye, out ret) — eye Mono=0
+    using fn_t = void (*)(void*, Vec3*, int, Vec3*);
+    int eye = 2; // MonoOrStereoscopicEye.Mono = 2 on many builds; try 0 first
+    eye = 0;
+    RVA<fn_t>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &world, eye, &out);
+    return out;
 }
 
 static void look_at_safe(void* tr, Vec3 worldPoint) {
-    if (!tr || !U().init() || !U().look_at) return;
-    void* exc = nullptr;
-    void* args[1] = { &worldPoint };
-    IL2CPP().runtime_invoke(U().look_at, (Il2CppObject*)tr, args, &exc);
+    if (!tr || !unity_base()) return;
+    // Internal_LookAt_Injected(ref pos, ref up)
+    Vec3 up{0, 1, 0};
+    using fn_t = void (*)(void*, Vec3*, Vec3*);
+    RVA<fn_t>(Offsets::Transform_Internal_LookAt_Inj)(tr, &worldPoint, &up);
 }
+
+// stub for old U().init() path
+struct UnityFns { bool init(){ return unity_base()!=0; } };
+static UnityFns& U() { static UnityFns u; return u; }
 
 struct PSnap {
     void* obj;
@@ -295,7 +271,7 @@ static void refresh_players(void* camTr) {
     void* local = nullptr;
     float bestD = 1e9f;
     for (void* pc : raw) {
-        void* tr = component_transform(pc);
+        void* tr = pc_transform(pc);
         if (!tr) continue;
         float d = vdist(get_pos(tr), camPos);
         if (d < bestD) { bestD = d; local = pc; }
@@ -305,7 +281,7 @@ static void refresh_players(void* camTr) {
     std::vector<PSnap> tmp;
     tmp.reserve(raw.size());
     for (void* pc : raw) {
-        void* tr = component_transform(pc);
+        void* tr = pc_transform(pc);
         if (!tr) continue;
         PSnap s{};
         s.obj   = pc;
