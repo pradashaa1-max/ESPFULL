@@ -17,7 +17,7 @@ UIView* Astral_SecureRoot = nil;
 // ─── State ───────────────────────────────────────────────────────────────────
 std::atomic<bool>  g_aimbot{false};
 std::atomic<bool>  g_silent{false};
-std::atomic<bool>  g_fovDraw{true};
+std::atomic<bool>  g_fovDraw{false};
 std::atomic<bool>  g_espBox{false};
 std::atomic<bool>  g_espSkel{false};
 std::atomic<bool>  g_espName{false};
@@ -368,13 +368,13 @@ static void rebuildContent() {
     if (g_section == 0) { // Aim
         add(makeSwitch(L("Aim bot","Аимбот"),
                        L("Automatically aims at enemies","Автоматически наводится на врагов"),
-                       g_aimbot.load(), ^(bool v){ g_aimbot=v; if(v) g_fovDraw=true; }));
+                       g_aimbot.load(), ^(bool v){ g_aimbot=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Silent","Сайлент"),
                        L("Hides your aim from other players","Скрывает наводку от других"),
-                       g_silent.load(), ^(bool v){ g_silent=v; }));
+                       g_silent.load(), ^(bool v){ g_silent=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("FOV Circle","Круг FOV"),
                        L("Shows the aim range circle","Показывает круг зоны аима"),
-                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; }));
+                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; Astral_SaveConfig(); }));
         add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; }));
         add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 15, ^(float v){ g_smooth=v; }));
         add(makeSegment(L("Bone","Кость"),
@@ -384,34 +384,34 @@ static void rebuildContent() {
     else if (g_section == 1) { // Visuals
         add(makeSwitch(L("Box ESP","Бокс ESP"),
                        L("2D box around players","Рамка вокруг игроков"),
-                       g_espBox.load(), ^(bool v){ g_espBox=v; if(v) g_fovDraw=true; }));
+                       g_espBox.load(), ^(bool v){ g_espBox=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Skeleton","Скелет"),
                        L("Bone lines","Линии костей"),
-                       g_espSkel.load(), ^(bool v){ g_espSkel=v; }));
+                       g_espSkel.load(), ^(bool v){ g_espSkel=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Names","Ники"),
                        L("Player name tags","Никнеймы игроков"),
-                       g_espName.load(), ^(bool v){ g_espName=v; }));
+                       g_espName.load(), ^(bool v){ g_espName=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Health bar","Здоровье"),
                        L("HP bar + percent","Полоска HP + проценты"),
-                       g_espHP.load(), ^(bool v){ g_espHP=v; }));
+                       g_espHP.load(), ^(bool v){ g_espHP=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Weapon","Оружие"),
                        L("Weapon icon under player","Иконка оружия"),
-                       g_espWeapon.load(), ^(bool v){ g_espWeapon=v; }));
+                       g_espWeapon.load(), ^(bool v){ g_espWeapon=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Distance","Дистанция"),
                        L("Distance in meters","Дистанция в метрах"),
-                       g_espDist.load(), ^(bool v){ g_espDist=v; }));
+                       g_espDist.load(), ^(bool v){ g_espDist=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Team check","Свои"),
                        L("Ignore teammates","Игнорировать союзников"),
-                       g_espTeam.load(), ^(bool v){ g_espTeam=v; }));
+                       g_espTeam.load(), ^(bool v){ g_espTeam=v; Astral_SaveConfig(); }));
     }
     else if (g_section == 2) { // Misc
         add(makeSwitch(L("No Recoil","Без отдачи"),
                        L("Reduce weapon recoil","Убрать отдачу"),
-                       g_noRecoil.load(), ^(bool v){ g_noRecoil=v; }));
+                       g_noRecoil.load(), ^(bool v){ g_noRecoil=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Hide from recording","Скрытие записи"),
                        L("Hide menu & ESP on screenshots/record","Скрыть меню и ESP на скринах"),
                        g_hideRec.load(), ^(bool v){
-                           g_hideRec=v;
+                           g_hideRec=v; Astral_SaveConfig();
                            UIView* root = g_hostWin ? g_hostWin.rootViewController.view : nil;
                            applyHideRec(root);
                        }));
@@ -611,6 +611,8 @@ static void buildFab(UIView* host) {
 }
 
 + (void)tryAttach {
+    static dispatch_once_t onceCfg;
+    dispatch_once(&onceCfg, ^{ Astral_LoadConfig(); });
     UIWindow* key = [self gameWindow];
     if (!key) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)),
