@@ -559,7 +559,7 @@ UIView* g_esp_view(void) { return g_esp; }
                     wpn = [NSString stringWithFormat:@"%s", p.weapon];
                 else
                     wpn = [NSString stringWithFormat:@"%d", p.ammo];
-                [wpn drawAtPoint:CGPointMake(left, bot + 2)
+                [wpn drawAtPoint:CGPointMake(left, bot + 4)
                   withAttributes:@{
                       NSFontAttributeName: [UIFont systemFontOfSize:10],
                       NSForegroundColorAttributeName: [UIColor colorWithRed:0.85 green:0.85 blue:0.4 alpha:1]
@@ -576,13 +576,18 @@ UIView* g_esp_view(void) { return g_esp; }
         }
     }
 
-    // grenades + bomb
+    // grenades + bomb (menu toggles)
+    if (g_espBomb.load() || g_espGrenade.load()) {
     std::vector<WorldSnap> world;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         world = g_world;
     }
     for (auto& w : world) {
+        BOOL isBomb = (strncmp(w.label, "BOMB", 4) == 0);
+        if (isBomb && !g_espBomb.load()) continue;
+        if (!isBomb && !g_espGrenade.load()) continue;
+
         Vec3 sc = w2s(cam, w.pos);
         if (sc.z < 0.05f) continue;
         CGFloat x = sc.x - 3.f;
@@ -601,6 +606,7 @@ UIView* g_esp_view(void) { return g_esp; }
               NSForegroundColorAttributeName: col
           }];
     }
+    } // bomb/grenade toggles
 }
 @end
 
@@ -629,8 +635,10 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
 
 // Safe recoil: only 3 float multipliers on WeaponParameters, absolute, once.
 // Never touch nested RecoilParameters* (that crashed).
-// Recoil: zero GunController instance floats (runtime), never SO
+// Recoil: ONLY WeaponParameters multipliers — never GunController floats (those caused rapid fire)
 static void apply_recoil(void* localPc) {
+    static float lastPct = -999.f;
+    static void* lastP = nullptr;
     float pct = g_recoilPct.load();
     if (pct < 1.f || !ok_ptr(localPc)) return;
 
@@ -642,20 +650,25 @@ static void apply_recoil(void* localPc) {
         wc = R<F>(0x162E58C)(wry);
     }
     if (!ok_ptr(wc)) return;
+    void* params = *(void**)((char*)wc + Offsets::WC_weaponParams);
+    if (!ok_ptr(params)) return;
 
-    // GunController runtime floats @ 0xD0 / 0xD4 — damp by pct
-    float keep = 1.f - pct / 100.f;
-    if (keep < 0.f) keep = 0.f;
+    if (params == lastP && fabsf(pct - lastPct) < 0.5f) return;
+    lastP = params;
+    lastPct = pct;
+
+    float mul = 1.f - pct / 100.f;
+    if (mul < 0.f) mul = 0.f;
+    if (mul > 1.f) mul = 1.f;
+
     @try {
-        float* f0 = (float*)((char*)wc + 0xD0);
-        float* f1 = (float*)((char*)wc + 0xD4);
-        if (*f0 == *f0 && fabsf(*f0) < 50.f) *f0 *= keep;
-        if (*f1 == *f1 && fabsf(*f1) < 50.f) *f1 *= keep;
-        // also zero common recoil progress ints area carefully
-        if (pct >= 90.f) {
-            if (*f0 == *f0) *f0 = 0.f;
-            if (*f1 == *f1) *f1 = 0.f;
-        }
+        float* m1 = (float*)((char*)params + Offsets::GP_recoilMultCrouch);
+        float* m2 = (float*)((char*)params + Offsets::GP_recoilAimMult);
+        float* m3 = (float*)((char*)params + Offsets::GP_recoilAimCrouch);
+        // only touch if value looks like a multiplier (0..5), not fire-rate
+        if (*m1 == *m1 && *m1 >= 0.f && *m1 <= 5.f) *m1 = mul;
+        if (*m2 == *m2 && *m2 >= 0.f && *m2 <= 5.f) *m2 = mul;
+        if (*m3 == *m3 && *m3 >= 0.f && *m3 <= 5.f) *m3 = mul;
     } @catch (...) {}
 }
 
@@ -681,10 +694,7 @@ static void run_aim(void* cam, void* camTr) {
         if (!ok_ptr(aimCtrl)) return;
 
         void* aimTr = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
-        if (!ok_ptr(aimTr)) {
-            // FPSCamera transform @ 0x70
-            aimTr = *(void**)((char*)aimCtrl + Offsets::AC_FPSCamera);
-        }
+        if (!ok_ptr(aimTr)) aimTr = *(void**)((char*)aimCtrl + Offsets::AC_FPSCamera);
         if (!ok_ptr(aimTr)) aimTr = camTr;
 
         CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
@@ -717,17 +727,18 @@ static void run_aim(void* cam, void* camTr) {
                 if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
             }
             Vec3 bone = {base.x, base.y + boneY, base.z};
+            float distTo = vdist(cpos, bone);
 
-            // visible check for aim only (Linecast no hitInfo — safer)
-            if (unity_base()) {
-                using LC = bool (*)(Vec3*, Vec3*, int);
+            // visible check (menu toggle)
+            if (g_aimVisible.load() && unity_base() && distTo > 1.f) {
+                RayHit hit{};
                 Vec3 from = cpos;
-                // slight lift so we don't start inside local collider
-                from.y += 0.1f;
-                if (R<LC>(0x336E920)(&from, &bone, ~0)) {
-                    // blocked by something — skip (wall)
-                    // Note: may false-positive on own gun; if aim never locks, comment out
-                    continue;
+                from.y += 0.15f;
+                Vec3 dir = vnorm(vsub(bone, from));
+                using RC = bool (*)(Vec3*, Vec3*, RayHit*, float, int);
+                bool hitSomething = R<RC>(0x336DFBC)(&from, &dir, &hit, distTo - 0.25f, ~0);
+                if (hitSomething && hit.distance + 0.5f < distTo) {
+                    continue; // wall between
                 }
             }
 
@@ -764,26 +775,18 @@ static void run_aim(void* cam, void* camTr) {
         if (pitch < -85.f) pitch = -85.f;
         if (pitch >  85.f) pitch =  85.f;
 
-        // Write AimController angles (0x164 / 0x168)
+        // ONLY angle fields — NO LookAt (LookAt moves camera → ESP floats)
         float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
         float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
         float curP = *aPitch, curY = *aYaw;
         if (curP == curP && fabsf(curP) < 360.f) {
-            *aPitch = g_silent.load() ? pitch : (curP + (pitch - curP) / fmaxf(1.f, sm));
+            *aPitch = g_silent.load() ? pitch : (curP + (pitch - curP) / sm);
         }
         if (curY == curY && fabsf(curY) < 720.f) {
             float dy = yaw - curY;
             while (dy >  180.f) dy -= 360.f;
             while (dy < -180.f) dy += 360.f;
-            *aYaw = g_silent.load() ? yaw : (curY + dy / fmaxf(1.f, sm));
-        }
-
-        // Also set euler on camTransform — makes aim actually move view
-        // silent still sets it so shots follow; game often reads transform for fire
-        if (ok_ptr(aimTr) && unity_base()) {
-            Vec3 up{0, 1, 0};
-            using Look = void (*)(void*, Vec3*, Vec3*);
-            R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
+            *aYaw = g_silent.load() ? yaw : (curY + dy / sm);
         }
     } @catch (...) {
         g_haveSilent = false;

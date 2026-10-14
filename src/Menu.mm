@@ -17,12 +17,15 @@ UIView* Astral_SecureRoot = nil;
 // ─── State ───────────────────────────────────────────────────────────────────
 std::atomic<bool>  g_aimbot{false};
 std::atomic<bool>  g_silent{false};
+std::atomic<bool>  g_aimVisible{true};
 std::atomic<bool>  g_fovDraw{false};
 std::atomic<bool>  g_espBox{false};
 std::atomic<bool>  g_espSkel{false};
 std::atomic<bool>  g_espName{false};
 std::atomic<bool>  g_espHP{false};
 std::atomic<bool>  g_espWeapon{false};
+std::atomic<bool>  g_espBomb{true};
+std::atomic<bool>  g_espGrenade{true};
 std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
@@ -40,12 +43,15 @@ void Astral_SaveConfig(void) {
     NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
     [d setBool:g_aimbot.load()   forKey:@"astral_aimbot"];
     [d setBool:g_silent.load()   forKey:@"astral_silent"];
+    [d setBool:g_aimVisible.load()forKey:@"astral_aimVisible"];
     [d setBool:g_fovDraw.load()  forKey:@"astral_fovDraw"];
     [d setBool:g_espBox.load()   forKey:@"astral_espBox"];
     [d setBool:g_espSkel.load()  forKey:@"astral_espSkel"];
     [d setBool:g_espName.load()  forKey:@"astral_espName"];
     [d setBool:g_espHP.load()    forKey:@"astral_espHP"];
     [d setBool:g_espWeapon.load()forKey:@"astral_espWeapon"];
+    [d setBool:g_espBomb.load()   forKey:@"astral_espBomb"];
+    [d setBool:g_espGrenade.load()forKey:@"astral_espGrenade"];
     [d setBool:g_espDist.load()  forKey:@"astral_espDist"];
     [d setBool:g_espTeam.load()  forKey:@"astral_espTeam"];
     [d setBool:g_noRecoil.load() forKey:@"astral_noRecoil"];
@@ -64,12 +70,15 @@ void Astral_LoadConfig(void) {
     if (![d objectForKey:@"astral_hideRec"]) return; // first launch — keep defaults
     g_aimbot.store([d boolForKey:@"astral_aimbot"]);
     g_silent.store([d boolForKey:@"astral_silent"]);
+    if ([d objectForKey:@"astral_aimVisible"]) g_aimVisible.store([d boolForKey:@"astral_aimVisible"]);
     g_fovDraw.store([d boolForKey:@"astral_fovDraw"]);
     g_espBox.store([d boolForKey:@"astral_espBox"]);
     g_espSkel.store([d boolForKey:@"astral_espSkel"]);
     g_espName.store([d boolForKey:@"astral_espName"]);
     g_espHP.store([d boolForKey:@"astral_espHP"]);
     g_espWeapon.store([d boolForKey:@"astral_espWeapon"]);
+    g_espBomb.store([d boolForKey:@"astral_espBomb"]);
+    g_espGrenade.store([d boolForKey:@"astral_espGrenade"]);
     g_espDist.store([d boolForKey:@"astral_espDist"]);
     g_espTeam.store([d boolForKey:@"astral_espTeam"]);
     g_noRecoil.store([d boolForKey:@"astral_noRecoil"]);
@@ -437,6 +446,9 @@ static void rebuildContent() {
         add(makeSwitch(L("Silent","Сайлент"),
                        L("Hides your aim from other players","Скрывает наводку от других"),
                        g_silent.load(), ^(bool v){ g_silent=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("Visible check","Видимость"),
+                       L("Aim only if visible (no wall)","Aim только если видно"),
+                       g_aimVisible.load(), ^(bool v){ g_aimVisible=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("FOV Circle","Круг FOV"),
                        L("Shows the aim range circle","Показывает круг зоны аима"),
                        g_fovDraw.load(), ^(bool v){ g_fovDraw=v; Astral_SaveConfig(); }));
@@ -460,8 +472,14 @@ static void rebuildContent() {
                        L("HP bar + percent","Полоска HP + проценты"),
                        g_espHP.load(), ^(bool v){ g_espHP=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Weapon","Оружие"),
-                       L("Weapon icon under player","Иконка оружия"),
+                       L("Weapon + ammo under player","Оружие + патроны"),
                        g_espWeapon.load(), ^(bool v){ g_espWeapon=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("Bomb","Бомба"),
+                       L("Planted bomb + timer","Бомба + таймер"),
+                       g_espBomb.load(), ^(bool v){ g_espBomb=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("Grenades","Гранаты"),
+                       L("Flying grenades","Летящие гранаты"),
+                       g_espGrenade.load(), ^(bool v){ g_espGrenade=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Distance","Дистанция"),
                        L("Distance in meters","Дистанция в метрах"),
                        g_espDist.load(), ^(bool v){ g_espDist=v; Astral_SaveConfig(); }));
