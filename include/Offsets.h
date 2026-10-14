@@ -1,23 +1,24 @@
 #pragma once
 #include <cstdint>
 
-// Exact RVAs from user dump.cs (UnityFramework) — 100% this build
+// Exact RVAs / field offsets from dump.cs (UnityFramework) — this build
 namespace Offsets {
 
 // UnityEngine.Transform
-constexpr uint64_t Transform_get_position         = 0x33237F0;
-constexpr uint64_t Transform_get_position_Injected= 0x3323850;
-constexpr uint64_t Transform_get_forward          = 0x3323DD8;
-constexpr uint64_t Transform_LookAt_Vector3       = 0x3324990;
-constexpr uint64_t Transform_Internal_LookAt_Inj  = 0x3324A10;
+constexpr uint64_t Transform_get_position          = 0x33237F0;
+constexpr uint64_t Transform_get_position_Injected = 0x3323850;
+constexpr uint64_t Transform_get_forward           = 0x3323DD8;
+constexpr uint64_t Transform_LookAt_Vector3        = 0x3324990;
+constexpr uint64_t Transform_Internal_LookAt_Inj   = 0x3324A10;
+constexpr uint64_t Transform_set_rotation_Injected = 0x3323EAC;
 
 // UnityEngine.Camera
-constexpr uint64_t Camera_get_main                = 0x32F3E08;
-constexpr uint64_t Camera_WorldToScreenPoint      = 0x32F3A54;
-constexpr uint64_t Camera_WorldToScreenPoint_Inj  = 0x32F3740; // eye + out
+constexpr uint64_t Camera_get_main                 = 0x32F3E08;
+constexpr uint64_t Camera_WorldToScreenPoint       = 0x32F3A54;
+constexpr uint64_t Camera_WorldToScreenPoint_Inj   = 0x32F3740; // eye + out
 
 // UnityEngine.Component
-constexpr uint64_t Component_get_transform        = 0x3319A54;
+constexpr uint64_t Component_get_transform         = 0x3319A54;
 
 // PlayerController (Axlebolt.Standoff.Player)
 constexpr size_t PC_team           = 0x59;
@@ -31,22 +32,28 @@ constexpr size_t PC_photonPlayer   = 0x130;
 // AimController
 constexpr size_t AC_FPSCamera      = 0x70;
 constexpr size_t AC_camTransform   = 0x80;
+constexpr size_t AC_pitch          = 0x164; // CHDAEHHBGDDDEAD
+constexpr size_t AC_yaw            = 0x168; // HHGFDFEABBGEBEB
 
-// WeaponController recoil
-constexpr size_t WC_recoilControl  = 0xA8;
-constexpr size_t WC_recoilParams   = 0xB0;
-constexpr size_t WC_recoilMultCrouch = 0xD0;
-constexpr size_t WC_recoilAimMult  = 0xD8;
-constexpr size_t WC_recoilAimCrouch = 0xE0;
+// WeaponController → WeaponParameters*
+constexpr size_t WC_weaponParams   = 0x68;
+
+// GunParameters (WeaponParameters subclass) recoil fields
+constexpr size_t GP_recoilControl    = 0xA8; // int
+constexpr size_t GP_recoilParams     = 0xB0; // RecoilParameters*
+constexpr size_t GP_recoilMultCrouch = 0xD0;
+constexpr size_t GP_recoilAimMult    = 0xD8;
+constexpr size_t GP_recoilAimCrouch  = 0xE0;
 
 // RecoilParameters
 constexpr size_t RP_horiz          = 0x10;
 constexpr size_t RP_vert           = 0x14;
 constexpr size_t RP_camDev         = 0x48;
+constexpr size_t RP_accelDur       = 0x50;
+constexpr size_t RP_accelStep      = 0x54;
 
 // PhotonView.get_isMine
 constexpr uint64_t PhotonView_get_isMine = 0x149F1DC;
-
 
 // PhotonPlayer
 constexpr size_t PP_nameField      = 0x18;

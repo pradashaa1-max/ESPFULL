@@ -27,3 +27,7 @@ extern std::atomic<uint32_t> g_menuColor; // ARGB accent
 @class UIView;
 extern UIView* Astral_SecureRoot;
 #endif
+
+// Config persist
+void Astral_SaveConfig(void);
+void Astral_LoadConfig(void);
