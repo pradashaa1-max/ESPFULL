@@ -52,7 +52,9 @@ struct Il2CppApi {
 
     bool init() {
         void* handle = dlopen(nullptr, RTLD_NOW);
-        if (!handle) handle = dlopen("UnityFramework", RTLD_NOW);
+        if (!handle) handle = dlopen("@rpath/UnityFramework.framework/UnityFramework", RTLD_NOW);
+        if (!handle) handle = dlopen("UnityFramework", RTLD_LAZY);
+        // Also search loaded images via RTLD_DEFAULT for dlsym below
         auto sym = [&](const char* n) -> void* {
             void* p = dlsym(handle, n);
             if (!p) p = dlsym(RTLD_DEFAULT, n);
