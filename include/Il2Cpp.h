@@ -14,11 +14,23 @@ struct Il2CppType;
 struct Il2CppString;
 
 struct Il2CppArraySimple {
-    void* obj;
+    // Il2CppObject header (klass + monitor) + bounds + max_length + elements
+    void* klass;
+    void* monitor;
     void* bounds;
     uintptr_t max_length;
     void* vector[1];
 };
+
+// Safe element access for object arrays
+inline void** il2cpp_array_items(Il2CppArraySimple* a) {
+    return &a->vector[0];
+}
+inline uintptr_t il2cpp_array_len(Il2CppArraySimple* a, uint32_t (*array_length_fn)(void*)) {
+    if (array_length_fn) return array_length_fn((void*)a);
+    return a ? a->max_length : 0;
+}
+
 
 using il2cpp_domain_get_t                = Il2CppDomain* (*)();
 using il2cpp_domain_get_assemblies_t     = Il2CppAssembly** (*)(Il2CppDomain*, size_t*);
@@ -73,7 +85,7 @@ struct Il2CppApi {
         class_get_type             = (il2cpp_class_get_type_t)sym("il2cpp_class_get_type");
         type_get_object            = (il2cpp_type_get_object_t)sym("il2cpp_type_get_object");
         array_length               = (il2cpp_array_length_t)sym("il2cpp_array_length");
-        ready = domain_get && class_from_name && class_get_method_from_name && runtime_invoke;
+        ready = domain_get && class_from_name && class_get_method_from_name && runtime_invoke && type_get_object && class_get_type;
         return ready;
     }
 
