@@ -88,29 +88,28 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 
 @interface ACW : UIWindow @end
 @implementation ACW
-// Strict: only panel + FAB eat touches. Everything else → game.
-- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
+// If touch is NOT on panel/FAB — window is invisible to the system (Google + game work).
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
     extern UIView* g_panel_ref(void);
     extern UIView* g_fab_ref(void);
     UIView* panel = g_panel_ref();
     UIView* fab = g_fab_ref();
-    if (panel && !panel.hidden && panel.alpha > 0.01) {
+    if (panel && !panel.hidden && panel.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:panel];
-        if (CGRectContainsPoint(panel.bounds, lp)) {
-            UIView* h = [panel hitTest:lp withEvent:event];
-            if (h) return h;
-        }
+        if (CGRectContainsPoint(panel.bounds, lp)) return YES;
     }
     if (fab && !fab.hidden) {
         CGPoint lp = [self convertPoint:point toView:fab];
-        if (CGRectContainsPoint(fab.bounds, lp)) {
-            UIView* h = [fab hitTest:lp withEvent:event];
-            if (h) return h;
-        }
+        if (CGRectContainsPoint(fab.bounds, lp)) return YES;
     }
-    return nil;
+    return NO;
+}
+- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
+    if (![self pointInside:point withEvent:event]) return nil;
+    return [super hitTest:point withEvent:event];
 }
 - (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeFirstResponder { return NO; }
 @end
 
 @interface ACVC : UIViewController @end
@@ -554,7 +553,7 @@ static void buildFab(UIView* host) {
 
     if (!g_overlay) {
         g_overlay = [[ACW alloc] initWithFrame:kb];
-        g_overlay.windowLevel = UIWindowLevelAlert + 100;
+        g_overlay.windowLevel = UIWindowLevelStatusBar + 1;
         g_overlay.backgroundColor = UIColor.clearColor;
         g_overlay.userInteractionEnabled = YES;
         g_overlay.rootViewController = [ACVC new];

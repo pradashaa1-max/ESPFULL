@@ -282,17 +282,28 @@ static void refresh_players(void* camTr) {
     void* camTr = component_transform(cam);
     Vec3 camPos = camTr ? get_pos(camTr) : Vec3{};
 
-    // FOV circle — exact center of this view (must match crosshair)
+    // FOV circle — geometric center of this view
     if (g_fovDraw.load()) {
-        CGFloat w = self.bounds.size.width;
-        CGFloat h = self.bounds.size.height;
-        if (w < 10 || h < 10) { w = scr.width; h = scr.height; }
+        CGRect bb = self.bounds;
+        CGFloat w = CGRectGetWidth(bb);
+        CGFloat h = CGRectGetHeight(bb);
+        if (w < 10 || h < 10) return;
+        CGFloat cx = CGRectGetMidX(bb);
+        CGFloat cy = CGRectGetMidY(bb);
         CGFloat shortSide = MIN(w, h);
-        CGFloat r = shortSide * (0.03f + (g_fov.load() / 30.f) * 0.22f);
-        CGPoint c = CGPointMake(w * 0.5, h * 0.5);
-        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.25 green:0.65 blue:1.0 alpha:0.85].CGColor);
-        CGContextSetLineWidth(ctx, 1.6);
-        CGContextStrokeEllipseInRect(ctx, CGRectMake(c.x - r, c.y - r, r * 2, r * 2));
+        CGFloat r = shortSide * (0.04f + (g_fov.load() / 30.f) * 0.20f);
+        CGContextSaveGState(ctx);
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.25 green:0.65 blue:1.0 alpha:0.9].CGColor);
+        CGContextSetLineWidth(ctx, 1.8);
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - r, cy - r, r * 2.0, r * 2.0));
+        // tiny crosshair mark at true center for alignment check
+        CGContextSetLineWidth(ctx, 1.0);
+        CGContextMoveToPoint(ctx, cx - 4, cy);
+        CGContextAddLineToPoint(ctx, cx + 4, cy);
+        CGContextMoveToPoint(ctx, cx, cy - 4);
+        CGContextAddLineToPoint(ctx, cx, cy + 4);
+        CGContextStrokePath(ctx);
+        CGContextRestoreGState(ctx);
     }
 
     bool box  = g_espBox.load();
@@ -489,35 +500,50 @@ static void refresh_players(void* camTr) {
 static ESPView* g_espView = nil;
 
 void Astral_EnsureFOVOverlay(UIWindow* win) {
-    if (!win) return;
-    UIView* root = Astral_SecureRoot ?: (win.rootViewController.view ?: win);
-    // Always match the live window bounds (handles landscape / rotation)
-    CGRect b = win.bounds;
-    if (b.size.width < 10 || b.size.height < 10) {
+    // Always size ESP to the REAL key window (game), not our overlay.
+    // This keeps FOV at the true screen center in landscape.
+    UIWindow* gameWin = nil;
+    for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
+            if (w.isKeyWindow) { gameWin = w; break; }
+        }
+        if (gameWin) break;
+    }
+    if (!gameWin) gameWin = win;
+    if (!gameWin) return;
+
+    CGRect b = gameWin.bounds;
+    if (b.size.width < 2 || b.size.height < 2)
         b = [UIScreen mainScreen].bounds;
-    }
-    // If root is smaller/different, prefer root bounds in its coordinate space
-    if (root && root.bounds.size.width > 10) {
-        b = root.bounds;
-    }
+
+    // Parent: prefer secure root for hide-rec, else overlay root, else game window
+    UIView* root = Astral_SecureRoot;
+    if (!root && win) root = win.rootViewController.view;
+    if (!root) root = gameWin;
+
+    // Map game bounds into root coordinate space
+    CGRect frameInRoot = [root convertRect:b fromView:gameWin];
+    if (frameInRoot.size.width < 2) frameInRoot = root.bounds;
 
     if (!g_espView) {
-        g_espView = [[ESPView alloc] initWithFrame:b];
-        g_espView.userInteractionEnabled = NO; // never block game touches
+        g_espView = [[ESPView alloc] initWithFrame:frameInRoot];
+        g_espView.userInteractionEnabled = NO;
         g_espView.backgroundColor = UIColor.clearColor;
         g_espView.opaque = NO;
         g_espView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         g_espView.contentMode = UIViewContentModeRedraw;
         [root insertSubview:g_espView atIndex:0];
     } else {
-        if (!CGRectEqualToRect(g_espView.frame, b))
-            g_espView.frame = b;
+        if (!CGRectEqualToRect(g_espView.frame, frameInRoot))
+            g_espView.frame = frameInRoot;
         if (g_espView.superview != root) {
             [g_espView removeFromSuperview];
             [root insertSubview:g_espView atIndex:0];
         }
     }
 }
+
 
 // ─── Aimbot / Silent ─────────────────────────────────────────────────────────
 static Vec3 g_silent_dir{};
