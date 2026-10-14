@@ -17,12 +17,12 @@ UIView* Astral_SecureRoot = nil;
 // ─── State ───────────────────────────────────────────────────────────────────
 std::atomic<bool>  g_aimbot{false};
 std::atomic<bool>  g_silent{false};
-std::atomic<bool>  g_fovDraw{true};
-std::atomic<bool>  g_espBox{true};
-std::atomic<bool>  g_espSkel{true};
-std::atomic<bool>  g_espName{true};
-std::atomic<bool>  g_espHP{true};
-std::atomic<bool>  g_espWeapon{true};
+std::atomic<bool>  g_fovDraw{false};
+std::atomic<bool>  g_espBox{false};
+std::atomic<bool>  g_espSkel{false};
+std::atomic<bool>  g_espName{false};
+std::atomic<bool>  g_espHP{false};
+std::atomic<bool>  g_espWeapon{false};
 std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
@@ -140,10 +140,11 @@ static NSArray<UIButton*>* g_tabBtns = nil;
 
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
 static void applyHideRec(UIView* root) {
+    // root = OVERLAY root only — never the game window.
+    // Secure UITextField on Unity's view crashes on map load.
     if (!root) return;
     BOOL on = g_hideRec.load();
 
-    // Panel + FAB always on root, never inside secure field
     if (g_panel && g_panel.superview != root) {
         [g_panel removeFromSuperview];
         [root addSubview:g_panel];
@@ -154,9 +155,6 @@ static void applyHideRec(UIView* root) {
     }
 
     if (on) {
-        // Secure field is FULL SCREEN but userInteractionEnabled=NO →
-        // iOS skips the entire subtree in hit-testing → Google/game buttons work.
-        // ESP is parented inside the secure container so it is hidden from screenshots.
         if (!g_secureField) {
             g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
             g_secureField.secureTextEntry = YES;
@@ -171,14 +169,24 @@ static void applyHideRec(UIView* root) {
         else
             [root sendSubviewToBack:g_secureField];
 
-        // Internal secure container (first subview after secureTextEntry engages)
+        // Force layout so secure container exists
+        [g_secureField layoutIfNeeded];
         UIView* container = nil;
         for (UIView* s in g_secureField.subviews) {
-            if (s.bounds.size.width > 1) { container = s; break; }
+            s.userInteractionEnabled = NO;
+            if (!container && s.bounds.size.width >= root.bounds.size.width - 1)
+                container = s;
         }
-        if (!container) container = g_secureField;
+        if (!container) {
+            // create dedicated host inside field
+            container = [[UIView alloc] initWithFrame:root.bounds];
+            container.userInteractionEnabled = NO;
+            container.backgroundColor = UIColor.clearColor;
+            container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [g_secureField addSubview:container];
+        }
+        container.frame = root.bounds;
         container.userInteractionEnabled = NO;
-        container.frame = g_secureField.bounds;
         Astral_SecureRoot = container;
     } else {
         Astral_SecureRoot = nil;
@@ -187,8 +195,6 @@ static void applyHideRec(UIView* root) {
             g_secureField = nil;
         }
     }
-
-    // Keep interactive chrome in front
     if (g_panel) [root bringSubviewToFront:g_panel];
     if (g_fab)   [root bringSubviewToFront:g_fab];
     Astral_EnsureFOVOverlay(g_hostWin);
@@ -378,7 +384,7 @@ static void rebuildContent() {
                        L("Hide menu & ESP on screenshots/record","Скрыть меню и ESP на скринах"),
                        g_hideRec.load(), ^(bool v){
                            g_hideRec=v;
-                           UIView* root = g_hostWin.rootViewController.view;
+                           UIView* root = g_hostWin ? g_hostWin.rootViewController.view : nil;
                            applyHideRec(root);
                        }));
     }
@@ -535,18 +541,15 @@ static void buildFab(UIView* host) {
     UIWindow* key = nil;
     for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
         if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene* ws = (UIWindowScene*)sc;
-        for (UIWindow* w in ws.windows) {
+        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
             if (w.isKeyWindow) { key = w; break; }
         }
         if (key) break;
-        if (!key && ws.windows.count) key = ws.windows.firstObject;
     }
     if (!key) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         key = UIApplication.sharedApplication.keyWindow;
-        if (!key) key = UIApplication.sharedApplication.windows.firstObject;
 #pragma clang diagnostic pop
     }
     return key;
@@ -555,27 +558,36 @@ static void buildFab(UIView* host) {
 + (void)tryAttach {
     UIWindow* key = [self gameWindow];
     if (!key) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4*NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ [self tryAttach]; });
         return;
     }
 
-    // NO second UIWindow — Google + game keep their own touch path
-    g_hostWin = key;
-    UIView* root = key.rootViewController.view ?: (UIView*)key;
+    // Separate overlay window — NEVER inject UITextField into Unity/game window
+    // (that is what crashes on map load)
+    if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
+        CGRect f = key.bounds;
+        if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
+        ACW* ov = [[ACW alloc] initWithFrame:f];
+        ov.windowLevel = UIWindowLevelAlert + 50;
+        ov.backgroundColor = UIColor.clearColor;
+        ov.rootViewController = [ACVC new];
+        ov.userInteractionEnabled = YES;
+        ov.hidden = NO;
+        // do NOT makeKeyAndVisible
+        g_hostWin = ov;
+    } else {
+        g_hostWin.frame = key.bounds;
+    }
+
+    UIView* root = g_hostWin.rootViewController.view;
+    root.frame = g_hostWin.bounds;
+    root.backgroundColor = UIColor.clearColor;
 
     buildPanel(root);
     buildFab(root);
-    // Delay secure-field until game is stable (prevents crash on match load)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (g_hostWin) {
-            UIView* r = g_hostWin.rootViewController.view ?: (UIView*)g_hostWin;
-            applyHideRec(r);
-        }
-    });
-    Astral_SecureRoot = nil; // FOV/ESP on normal root until hide applies
-    Astral_EnsureFOVOverlay(key);
+    applyHideRec(root);   // secure + ESP only inside OVERLAY
+    Astral_EnsureFOVOverlay(g_hostWin);
 
     if (g_panel) [root bringSubviewToFront:g_panel];
     if (g_fab)   [root bringSubviewToFront:g_fab];
@@ -588,15 +600,26 @@ static void buildFab(UIView* host) {
 }
 
 + (void)onTick {
-    // Stay on the original game window — do NOT jump onto Google/auth sheets
-    UIWindow* key = g_hostWin;
-    if (!key || key.hidden || !key.rootViewController) {
-        key = [self gameWindow];
-        g_hostWin = key;
+    UIWindow* key = [self gameWindow];
+    if (key && g_hostWin) {
+        CGRect b = key.bounds;
+        if (b.size.width > 2 && !CGRectEqualToRect(g_hostWin.frame, b)) {
+            g_hostWin.frame = b;
+            g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
+        }
     }
-    if (key) {
-        UIView* root = key.rootViewController.view ?: (UIView*)key;
-        Astral_EnsureFOVOverlay(key);
+    if (g_hostWin) {
+        UIView* root = g_hostWin.rootViewController.view;
+        // keep secure full-size
+        if (g_secureField) {
+            g_secureField.frame = root.bounds;
+            g_secureField.userInteractionEnabled = NO;
+            if (Astral_SecureRoot) {
+                Astral_SecureRoot.frame = root.bounds;
+                Astral_SecureRoot.userInteractionEnabled = NO;
+            }
+        }
+        Astral_EnsureFOVOverlay(g_hostWin);
         if (g_panel) [root bringSubviewToFront:g_panel];
         if (g_fab)   [root bringSubviewToFront:g_fab];
     }

@@ -678,57 +678,50 @@ extern "C" bool Astral_GetSilentDir(float* x, float* y, float* z) {
 
 // ─── Frame tick ──────────────────────────────────────────────────────────────
 void Astral_FeaturesTick() {
-    // UI always safe — no native Unity calls
+    // UI path only — always safe
     if (g_espView) {
         UIView* root = g_espView.superview;
         if (root) {
-            UIView* host = root;
-            while (host.superview) host = host.superview;
-            CGRect b = host.bounds;
-            if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
+            CGRect b = root.bounds;
+            if (b.size.width < 2 && root.superview)
+                b = root.superview.bounds;
+            if (b.size.width < 2)
+                b = UIScreen.mainScreen.bounds;
             b.origin = CGPointZero;
-            if (root != host) root.frame = b;
             g_espView.frame = b;
             g_espView.userInteractionEnabled = NO;
         }
         [g_espView setNeedsDisplay];
     }
 
+    // NO Unity/IL2CPP until user actually enables a feature
+    bool needGame = g_espBox.load() || g_espSkel.load() || g_espName.load()
+                 || g_espHP.load() || g_espWeapon.load() || g_espDist.load()
+                 || g_aimbot.load() || g_silent.load();
+    if (!needGame) return;
+
     if (!unity_base()) return;
     if (!U().init()) return;
 
-    void* cam = nullptr;
-    void* camTr = nullptr;
-    @try {
-        cam = main_camera();
-        if (cam) camTr = component_transform(cam);
-    } @catch (id e) {
-        return;
-    }
-    if (!cam || !camTr) return;
+    void* cam = main_camera();
+    if (!cam) return;
+    void* camTr = component_transform(cam);
+    if (!camTr) return;
 
-    // Wait ~1s of stable camera before any player scan (avoids crash on match load)
+    // Require stable camera for 2 seconds before scanning (map load crash fix)
     static int stable = 0;
+    static void* lastCam = nullptr;
+    if (cam != lastCam) { stable = 0; lastCam = cam; }
     stable++;
-    if (stable < 60) return;
+    if (stable < 120) return; // ~2s at 60fps
 
-    if (++g_refresh_ctr >= 20) {
+    if (++g_refresh_ctr >= 30) {
         g_refresh_ctr = 0;
-        @try {
-            refresh_players(camTr);
-        } @catch (id e) {
-            // swallow
-        }
+        refresh_players(camTr);
     }
 
-    CGSize scr = UIScreen.mainScreen.bounds.size;
-    if (scr.height > scr.width) scr = CGSizeMake(scr.height, scr.width);
-    if (g_espView && g_espView.bounds.size.width > 10)
-        scr = g_espView.bounds.size;
-
-    if (g_aimbot.load() || g_silent.load()) {
-        @try {
-            run_aim(cam, camTr, scr);
-        } @catch (id e) {}
-    }
+    CGSize scr = g_espView ? g_espView.bounds.size : UIScreen.mainScreen.bounds.size;
+    if (scr.width < 2) return;
+    if (g_aimbot.load() || g_silent.load())
+        run_aim(cam, camTr, scr);
 }
