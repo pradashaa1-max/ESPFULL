@@ -381,7 +381,6 @@ static void refresh(void* camTr) {
                 }
             }
         } @catch (...) {}
-        } @catch (...) {}
         if (s.local) mines++;
         float d = vdist(p, cpos);
         if (d < bestD) { bestD = d; bestIdx = tmp.size(); }
@@ -394,7 +393,7 @@ static void refresh(void* camTr) {
         if (!s.name[0]) snprintf(s.name, sizeof(s.name), "P");
         tmp.push_back(s);
     }
-    if (mines == 0 && !tmp.empty() && bestD < 5.f)
+    if (mines == 0 && !tmp.empty() && bestIdx < tmp.size() && bestD < 5.f)
         tmp[bestIdx].local = true;
 
     // World ESP: every 2nd refresh (HE appears fast). Timers: bomb / smoke / molly only.
