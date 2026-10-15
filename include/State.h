@@ -19,6 +19,7 @@ extern std::atomic<bool>  g_espTeam;
 extern std::atomic<bool>  g_noRecoil;     // legacy — syncs with recoilPct
 extern std::atomic<float> g_recoilPct;    // 0..100 (0=full, 100=zero)
 extern std::atomic<bool>  g_hideRec;
+extern std::atomic<bool>  g_skinChanger;
 extern std::atomic<bool>  g_menuOpen;
 extern std::atomic<float> g_fov;
 extern std::atomic<float> g_smooth;
