@@ -36,7 +36,7 @@ std::atomic<float> g_fov{25.f};
 std::atomic<float> g_smooth{4.5f};
 std::atomic<int>   g_bone{0};
 std::atomic<int>   g_lang{0};             // 0 EN 1 RU
-std::atomic<uint32_t> g_menuColor{0xFF1E90FF};
+std::atomic<uint32_t> g_menuColor{0xFF00E5A8};
 
 // ─── Config persist (NSUserDefaults) ─────────────────────────────────────────
 void Astral_SaveConfig(void) {
@@ -319,8 +319,8 @@ static UIView* makeHeader(NSString* title) {
 
 static UIView* makeSwitch(NSString* title, NSString* sub, bool on, void(^cb)(bool)) {
     UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,54)];
-    row.backgroundColor = C(0.06,0.08,0.14,0.95);
-    row.layer.cornerRadius = 12;
+    row.backgroundColor = C(0.07,0.09,0.14,0.92);
+    row.layer.cornerRadius = 14;
     row.layer.borderWidth = 1;
     row.layer.borderColor = [Accent() colorWithAlphaComponent:0.35].CGColor;
 
@@ -348,8 +348,8 @@ static UIView* makeSwitch(NSString* title, NSString* sub, bool on, void(^cb)(boo
 
 static UIView* makeSlider(NSString* title, float val, float mn, float mx, void(^cb)(float)) {
     UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,64)];
-    row.backgroundColor = C(0.06,0.08,0.14,0.95);
-    row.layer.cornerRadius = 12;
+    row.backgroundColor = C(0.07,0.09,0.14,0.92);
+    row.layer.cornerRadius = 14;
     row.layer.borderWidth = 1;
     row.layer.borderColor = [Accent() colorWithAlphaComponent:0.35].CGColor;
 
@@ -381,8 +381,8 @@ static UIView* makeSlider(NSString* title, float val, float mn, float mx, void(^
 
 static UIView* makeSegment(NSString* title, NSArray* items, int sel, void(^cb)(int)) {
     UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,64)];
-    row.backgroundColor = C(0.06,0.08,0.14,0.95);
-    row.layer.cornerRadius = 12;
+    row.backgroundColor = C(0.07,0.09,0.14,0.92);
+    row.layer.cornerRadius = 14;
     row.layer.borderWidth = 1;
     row.layer.borderColor = [Accent() colorWithAlphaComponent:0.35].CGColor;
 
@@ -405,8 +405,8 @@ static UIView* makeSegment(NSString* title, NSArray* items, int sel, void(^cb)(i
 
 static UIView* makeColorRow(NSString* title) {
     UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,54)];
-    row.backgroundColor = C(0.06,0.08,0.14,0.95);
-    row.layer.cornerRadius = 12;
+    row.backgroundColor = C(0.07,0.09,0.14,0.92);
+    row.layer.cornerRadius = 14;
     row.layer.borderWidth = 1;
     row.layer.borderColor = [Accent() colorWithAlphaComponent:0.35].CGColor;
 
@@ -584,8 +584,8 @@ static void buildPanel(UIView* host) {
 
     CGFloat pw = 340, ph = 420;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(16, 50, pw, ph)];
-    g_panel.backgroundColor = C(0.04,0.05,0.10,0.96);
-    g_panel.layer.cornerRadius = 16;
+    g_panel.backgroundColor = C(0.03,0.04,0.08,0.97);
+    g_panel.layer.cornerRadius = 18;
     g_panel.layer.borderWidth = 1.5;
     g_panel.layer.borderColor = [Accent() colorWithAlphaComponent:0.5].CGColor;
     g_panel.layer.shadowColor = Accent().CGColor;

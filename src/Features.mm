@@ -103,24 +103,24 @@ static Vec3 w2s(void* cam, Vec3 w) {
     return o;
 }
 
-// Visible: Physics.Linecast. Soft — on any fault treat as visible=false for aimbot safety.
+// Visible check. On fault → true (don't kill aimbot if Linecast RVA/mask is wrong).
 static bool is_visible(Vec3 from, Vec3 to) {
-    if (!unity_base()) return false;
+    if (!unity_base()) return true;
     @try {
-        // nudge start forward so we don't hit local player capsule
         Vec3 dir = vnorm(vsub(to, from));
-        Vec3 start = {from.x + dir.x * 0.35f, from.y + dir.y * 0.35f + 0.1f, from.z + dir.z * 0.35f};
+        Vec3 start = {from.x + dir.x * 0.4f, from.y + dir.y * 0.4f + 0.15f, from.z + dir.z * 0.4f};
         RayHit hit{};
-        // layerMask: Default+Static world typical bits; avoid ~0 (hits everything / crashy)
-        const int mask = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 8) | (1 << 9) | (1 << 10);
+        // Default layer only — safer than wide mask
+        const int mask = 1 << 0;
         using F = bool (*)(Vec3*, Vec3*, RayHit*, int);
         bool hitSomething = R<F>(0x336EA3C)(&start, &to, &hit, mask);
         if (!hitSomething) return true;
-        float need = vdist(start, to) - 0.45f;
-        if (need < 0.1f) need = 0.1f;
+        if (hit.distance != hit.distance || hit.distance < 0.f) return true;
+        float need = vdist(start, to) - 0.5f;
+        if (need < 0.2f) need = 0.2f;
         return hit.distance >= need;
     } @catch (...) {
-        return false;
+        return true; // don't disable aim on physics errors
     }
 }
 
@@ -272,85 +272,115 @@ static void refresh(void* camTr) {
         s.ammo = -1;
         s.ammoMax = -1;
         s.weapon[0] = 0;
-        // HP/Armor: PlayerController 0x128/0x12C (props HDEEAEBEFHFHHDB / DDAAEECEBADEDBF)
-        // Ammo: ONLY on guns — reading GunController layout on HE/Flash = CRASH on buy
+        // HP / Armor / Ammo — all safe paths we know from dump
         @try {
-            // Path1: PC ints 0x128 / 0x12C
-            int hv = *(int*)((char*)pc + 0x128);
-            int ar = *(int*)((char*)pc + 0x12C);
-            if (hv >= 0 && hv <= 100) s.hp = (float)hv;
-            if (ar >= 0 && ar <= 100) s.armor = (float)ar;
-            // Path2: property getters (simple field return in dump)
+            auto ok100 = [](int v) { return v >= 0 && v <= 100; };
+            auto okAmmo = [](int v) { return v >= 0 && v <= 150; };
+
+            // --- HP / Armor ---
+            // A) PlayerController ints around 0x128 (property pair in dump)
+            {
+                int a = *(int*)((char*)pc + 0x128);
+                int b = *(int*)((char*)pc + 0x12C);
+                if (ok100(a)) s.hp = (float)a;
+                if (ok100(b)) s.armor = (float)b;
+            }
+            // B) property getters
             if ((s.hp < 0.f || s.armor < 0.f) && unity_base()) {
                 @try {
                     using FI = int (*)(void*);
                     if (s.hp < 0.f) {
-                        int v = R<FI>(0x1623100)(pc); // get_HDEEAEBEFHFHHDB
-                        if (v >= 0 && v <= 100) s.hp = (float)v;
+                        int v = R<FI>(0x1623100)(pc);
+                        if (ok100(v)) s.hp = (float)v;
                     }
                     if (s.armor < 0.f) {
-                        int v = R<FI>(0x1623110)(pc); // get_DDAAEECEBADEDBF
-                        if (v >= 0 && v <= 100) s.armor = (float)v;
+                        int v = R<FI>(0x1623110)(pc);
+                        if (ok100(v)) s.armor = (float)v;
                     }
                 } @catch (...) {}
             }
-            // Path3: NetworkController snapshot ints
+            // C) NetworkController 0x90 / 0x94
             if (s.hp < 0.f || s.armor < 0.f) {
                 void* net = *(void**)((char*)pc + Offsets::PC_networkController);
                 if (ok_ptr(net)) {
-                    if (s.hp < 0.f) {
-                        int n = *(int*)((char*)net + 0x90);
-                        if (n >= 0 && n <= 100) s.hp = (float)n;
-                    }
-                    if (s.armor < 0.f) {
-                        int n = *(int*)((char*)net + 0x94);
-                        if (n >= 0 && n <= 100) s.armor = (float)n;
-                    }
+                    int a = *(int*)((char*)net + 0x90);
+                    int b = *(int*)((char*)net + 0x94);
+                    if (s.hp < 0.f && ok100(a)) s.hp = (float)a;
+                    if (s.armor < 0.f && ok100(b)) s.armor = (float)b;
                 }
             }
+            // D) if only one value found, treat as HP (armor optional)
+            // leave as-is
+
+            // --- Weapon name + Ammo ---
             void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
             if (ok_ptr(wry)) {
                 void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
                 if (ok_ptr(wc)) {
                     void* ns = *(void**)((char*)wc + 0x58);
                     if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                    // hard skip nades/knife/bomb — never touch GunController fields on them
-                    bool isGun = false;
-                    if (s.weapon[0]) {
-                        const char* bad[] = {"HE","Flash","Smoke","Molly","Incend","Grenade","Bomb","Knife","knife","C4", nullptr};
-                        isGun = true;
-                        for (int bi = 0; bad[bi]; bi++) {
-                            if (strstr(s.weapon, bad[bi])) { isGun = false; break; }
-                        }
-                    }
+
+                    bool isGun = s.weapon[0] != 0;
                     if (isGun) {
-                        // BHEHACCGBBGGBCH* @ 0xE0 / 0xE8 value @ +0x14
-                        auto rdObj = [](void* base, size_t off) -> int {
+                        const char* bad[] = {"HE","Flash","Smoke","Molly","Incend","Grenade","Bomb","Knife","knife","C4",nullptr};
+                        for (int i = 0; bad[i]; i++)
+                            if (strstr(s.weapon, bad[i])) { isGun = false; break; }
+                    }
+                    // no name → still try gun layout carefully if GunParameters present
+                    void* gp = ok_ptr(wc) ? *(void**)((char*)wc + 0x118) : nullptr;
+                    if (!ok_ptr(gp)) gp = nullptr;
+                    if (isGun || ok_ptr(gp)) {
+                        // current ammo: BHEHACCGBBGGBCH* @ 0xE0, value int/short @ +0x14
+                        auto rdMag = [](void* base, size_t off) -> int {
                             void* o = *(void**)((char*)base + off);
                             if (!ok_ptr(o)) return -1;
-                            short s14 = *(short*)((char*)o + 0x14);
-                            if (s14 >= 0 && s14 <= 150) return (int)s14;
+                            // BHEHACCGBBGGBCH: int at 0x14 holds ammo count
                             int i14 = *(int*)((char*)o + 0x14);
                             if (i14 >= 0 && i14 <= 150) return i14;
+                            short s14 = *(short*)((char*)o + 0x14);
+                            if (s14 >= 0 && s14 <= 150) return (int)s14;
+                            short s10 = *(short*)((char*)o + 0x10);
+                            if (s10 >= 0 && s10 <= 150) return (int)s10;
                             return -1;
                         };
-                        int a = rdObj(wc, 0xE0);
-                        int b = rdObj(wc, 0xE8);
-                        if (a < 0) {
+                        int cur = rdMag(wc, 0xE0);
+                        int res = rdMag(wc, 0xE8);
+                        // fallback plain ints on GunController
+                        if (cur < 0) {
                             int i0 = *(int*)((char*)wc + 0xD8);
-                            if (i0 >= 0 && i0 <= 150) a = i0;
+                            if (okAmmo(i0)) cur = i0;
                         }
-                        if (b < 0) {
+                        if (res < 0) {
                             int i1 = *(int*)((char*)wc + 0xDC);
-                            if (i1 >= 0 && i1 <= 150) b = i1;
+                            if (okAmmo(i1)) res = i1;
                         }
-                        if (a >= 0) {
-                            s.ammo = a;
-                            s.ammoMax = (b >= a && b <= 150) ? b : a;
+                        // max from GunParameters._ammunition @ 0x90 (Ammunition: short mag@0x10, capacity@0x12)
+                        int magCap = -1;
+                        if (ok_ptr(gp)) {
+                            @try {
+                                void* am = *(void**)((char*)gp + 0x90);
+                                if (ok_ptr(am)) {
+                                    short mc = *(short*)((char*)am + 0x10);
+                                    short cap = *(short*)((char*)am + 0x12);
+                                    if (mc >= 1 && mc <= 150) magCap = (int)mc;
+                                    else if (cap >= 1 && cap <= 150) magCap = (int)cap;
+                                }
+                            } @catch (...) {}
+                        }
+                        if (cur >= 0) {
+                            s.ammo = cur;
+                            if (magCap > 0) s.ammoMax = magCap;
+                            else if (res >= cur) s.ammoMax = res;
+                            else if (res >= 0) s.ammoMax = res;
+                            else s.ammoMax = cur;
+                        } else if (magCap > 0) {
+                            // show capacity only
+                            s.ammoMax = magCap;
                         }
                     }
                 }
             }
+        } @catch (...) {}
         } @catch (...) {}
         if (s.local) mines++;
         float d = vdist(p, cpos);
@@ -367,12 +397,11 @@ static void refresh(void* camTr) {
     if (mines == 0 && !tmp.empty() && bestD < 5.f)
         tmp[bestIdx].local = true;
 
-    // World ESP: throttle FOT hard (hangs on flying HE). Timers only bomb/smoke/molly.
+    // World ESP: every 2nd refresh (HE appears fast). Timers: bomb / smoke / molly only.
     std::vector<WorldSnap> wtmp;
     static int world_ctr = 0;
     bool wantWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty();
-    // every 8th player-refresh — FOT every frame freezes when HE is in air
-    bool doWorld = wantWorld && ((++world_ctr % 8) == 0);
+    bool doWorld = wantWorld && ((++world_ctr % 2) == 0);
     if (doWorld && (IL2CPP().ready || IL2CPP().init())) {
         auto& api = IL2CPP();
         auto collectSafe = [&](const char* ns, const char* cls, bool isBomb) {
@@ -398,7 +427,7 @@ static void refresh(void* camTr) {
                 push_array(a, arr, api);
                 int added = 0;
                 for (void* o : arr) {
-                    if (!ok_ptr(o) || added >= 6) break;
+                    if (!ok_ptr(o) || added >= 10) break;
                     @try {
                         void* tr = get_tr(o);
                         if (!ok_ptr(tr)) continue;
@@ -421,54 +450,67 @@ static void refresh(void* camTr) {
                                 }
                             } @catch (...) {}
                         } else {
-                            // Grenade: classify from parameters name — HE = pos only (no timer, no hang)
+                            // Weapon id enum @ 0x88: HE=91 Smoke=92 Flash=93 Molly=94
+                            int wid = -1;
+                            @try { wid = *(int*)((char*)o + 0x88); } @catch (...) { wid = -1; }
+                            // also try parameters name
                             char tmpn[24]{};
+                            float detDur = -1.f;
                             @try {
-                                void* gp = *(void**)((char*)o + 0x18); // GrenadeParameters*
+                                void* gp = *(void**)((char*)o + 0x18);
                                 if (ok_ptr(gp)) {
-                                    void* ns2 = *(void**)((char*)gp + 0x20);
-                                    if (!ok_ptr(ns2)) ns2 = *(void**)((char*)gp + 0x18);
-                                    if (ok_ptr(ns2)) read_str(ns2, tmpn, sizeof(tmpn));
+                                    // _detonationDuration on GrenadeParameters @ 0xA8
+                                    float d = *(float*)((char*)gp + 0xA8);
+                                    if (d == d && d > 0.3f && d <= 25.f) detDur = d;
+                                    for (size_t no : {0x20ul, 0x18ul, 0x28ul, 0x30ul}) {
+                                        void* ns2 = *(void**)((char*)gp + no);
+                                        if (ok_ptr(ns2)) {
+                                            read_str(ns2, tmpn, sizeof(tmpn));
+                                            if (tmpn[0]) break;
+                                        }
+                                    }
                                 }
-                            } @catch (...) { tmpn[0] = 0; }
+                            } @catch (...) {}
 
-                            bool isSmoke = tmpn[0] && (strstr(tmpn, "Smoke") || strstr(tmpn, "smoke"));
-                            bool isMolly = tmpn[0] && (strstr(tmpn, "Molly") || strstr(tmpn, "Incend")
-                                || strstr(tmpn, "Fire") || strstr(tmpn, "molly"));
-                            bool isFlash = tmpn[0] && (strstr(tmpn, "Flash") || strstr(tmpn, "flash"));
-                            bool isHE = !isSmoke && !isMolly && !isFlash; // default HE / unknown
+                            bool isSmoke = (wid == 92) || (tmpn[0] && (strstr(tmpn,"Smoke")||strstr(tmpn,"smoke")));
+                            bool isMolly = (wid == 94) || (tmpn[0] && (strstr(tmpn,"Molly")||strstr(tmpn,"Incend")||strstr(tmpn,"Fire")||strstr(tmpn,"molly")));
+                            bool isFlash = (wid == 93) || (tmpn[0] && (strstr(tmpn,"Flash")||strstr(tmpn,"flash")));
+                            bool isHE    = (wid == 91) || (!isSmoke && !isMolly && !isFlash);
+
+                            // fuse remaining: prefer 0x64, else detDur - elapsed(0x50)
+                            auto readFuse = [&](float maxT) -> float {
+                                float fuse = -1.f;
+                                @try {
+                                    float t64 = *(float*)((char*)o + 0x64);
+                                    float t50 = *(float*)((char*)o + 0x50);
+                                    if (t64 == t64 && t64 > 0.02f && t64 <= maxT) fuse = t64;
+                                    else if (detDur > 0.f && t50 == t50 && t50 >= 0.f && t50 < detDur)
+                                        fuse = detDur - t50;
+                                    else if (t50 == t50 && t50 > 0.02f && t50 <= maxT) fuse = t50;
+                                } @catch (...) {}
+                                return fuse;
+                            };
 
                             if (isSmoke) {
-                                snprintf(w.label, sizeof(w.label), "SMOKE");
-                                @try {
-                                    float t64 = *(float*)((char*)o + 0x64);
-                                    float t50 = *(float*)((char*)o + 0x50);
-                                    float fuse = -1.f;
-                                    if (t64 == t64 && t64 > 0.05f && t64 <= 20.f) fuse = t64;
-                                    else if (t50 == t50 && t50 > 0.05f && t50 <= 20.f) fuse = t50;
-                                    if (fuse > 0.f) {
-                                        w.timer = fuse;
-                                        snprintf(w.label, sizeof(w.label), "SMOKE %.1fs", fuse);
-                                    }
-                                } @catch (...) {}
+                                float fuse = readFuse(22.f);
+                                if (fuse > 0.f) {
+                                    w.timer = fuse;
+                                    snprintf(w.label, sizeof(w.label), "SMOKE %.1fs", fuse);
+                                } else {
+                                    snprintf(w.label, sizeof(w.label), "SMOKE");
+                                }
                             } else if (isMolly) {
-                                snprintf(w.label, sizeof(w.label), "MOLLY");
-                                @try {
-                                    float t64 = *(float*)((char*)o + 0x64);
-                                    float t50 = *(float*)((char*)o + 0x50);
-                                    float fuse = -1.f;
-                                    if (t64 == t64 && t64 > 0.05f && t64 <= 15.f) fuse = t64;
-                                    else if (t50 == t50 && t50 > 0.05f && t50 <= 15.f) fuse = t50;
-                                    if (fuse > 0.f) {
-                                        w.timer = fuse;
-                                        snprintf(w.label, sizeof(w.label), "MOLLY %.1fs", fuse);
-                                    }
-                                } @catch (...) {}
+                                float fuse = readFuse(12.f);
+                                if (fuse > 0.f) {
+                                    w.timer = fuse;
+                                    snprintf(w.label, sizeof(w.label), "MOLLY %.1fs", fuse);
+                                } else {
+                                    snprintf(w.label, sizeof(w.label), "MOLLY");
+                                }
                             } else if (isFlash) {
-                                // flash: label only, no timer
                                 snprintf(w.label, sizeof(w.label), "FLASH");
                             } else {
-                                // HE flying: position + label ONLY — field reads caused freeze
+                                // HE — position only, appear ASAP (no extra field reads)
                                 snprintf(w.label, sizeof(w.label), "HE");
                             }
                         }
@@ -485,16 +527,20 @@ static void refresh(void* camTr) {
         }
         if (g_espGrenade.load()) {
             collectSafe("Axlebolt.Standoff.Inventory.Grenade", "DroppedGrenadeController", false);
-            if (wtmp.size() < 6)
+            if (wtmp.size() < 10)
                 collectSafe("", "DroppedGrenadeController", false);
         }
     }
 
     std::lock_guard<std::mutex> lk(g_mtx);
     g_list.swap(tmp);
-    // only update world list when we collected; else keep previous (or clear if toggled off)
-    if (doWorld || (!g_espBomb.load() && !g_espGrenade.load())) {
-        g_world.swap(wtmp);
+    // clear if both off; update if we got objects; keep previous if empty collect (no blink/delay gap)
+    if (!g_espBomb.load() && !g_espGrenade.load()) {
+        g_world.clear();
+    } else if (doWorld) {
+        if (!wtmp.empty())
+            g_world.swap(wtmp);
+        // empty FOT result → keep last frame so HE doesn't vanish/lag
     }
   } @catch (...) {
     std::lock_guard<std::mutex> lk(g_mtx);
@@ -612,8 +658,8 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat padY   = fmaxf(2.f, nameFs * 0.35f);
 
         // Mockup-style ESP: green box, cyan skeleton, name badge, HP%, armor%, dist, weapon
-        UIColor* boxCol = [UIColor colorWithRed:0.2 green:0.95 blue:0.35 alpha:1];
-        UIColor* boneCol = [UIColor colorWithRed:0.2 green:0.85 blue:1.0 alpha:1];
+        UIColor* boxCol = [UIColor colorWithRed:0.25 green:0.98 blue:0.55 alpha:0.95];
+        UIColor* boneCol = [UIColor colorWithRed:0.35 green:0.90 blue:1.0 alpha:0.9];
 
         if (box) {
             CGContextSetStrokeColorWithColor(ctx, boxCol.CGColor);
@@ -661,37 +707,42 @@ UIView* g_esp_view(void) { return g_esp; }
                 CGContextFillEllipseInRect(ctx, CGRectMake(jx[ji] - 2.5f, jy[ji] - 2.5f, 5, 5));
         }
 
-        // HP bar (green) left + percent
-        if (hpOn && p.hp >= 0.f) {
+        // HP (green) + Armor (blue) bars — absolute remaining numbers
+        if (hpOn && (p.hp >= 0.f || p.armor >= 0.f)) {
             CGFloat barH = hgt;
-            CGFloat barW = 5.f;
-            CGFloat bx = left - 10.f;
-            CGFloat hp01 = fminf(1.f, fmaxf(0.f, p.hp / 100.f));
-            CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.55].CGColor);
-            CGContextFillRect(ctx, CGRectMake(bx, top, barW, barH));
-            UIColor* hc = hp01 > 0.5f ? [UIColor colorWithRed:0.2 green:0.9 blue:0.3 alpha:1]
-                         : hp01 > 0.25f ? [UIColor colorWithRed:0.95 green:0.75 blue:0.1 alpha:1]
-                         : [UIColor colorWithRed:0.95 green:0.2 blue:0.15 alpha:1];
-            CGContextSetFillColorWithColor(ctx, hc.CGColor);
-            CGFloat fill = barH * hp01;
-            CGContextFillRect(ctx, CGRectMake(bx, top + (barH - fill), barW, fill));
-            NSString* hpTxt = [NSString stringWithFormat:@"%.0f%%", hp01 * 100.f];
-            [hpTxt drawAtPoint:CGPointMake(bx - 2, bot + 1)
-              withAttributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:hpFs],
-                                NSForegroundColorAttributeName: hc }];
-            // Armor bar (blue) further left
+            CGFloat barW = 4.f;
+            CGFloat gap = 2.f;
+            // HP bar
+            if (p.hp >= 0.f) {
+                CGFloat bx = left - (barW + 6.f);
+                CGFloat hp01 = fminf(1.f, fmaxf(0.f, p.hp / 100.f));
+                // track
+                CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.5].CGColor);
+                CGContextFillRect(ctx, CGRectMake(bx - 0.5f, top - 0.5f, barW + 1.f, barH + 1.f));
+                UIColor* hc = hp01 > 0.55f ? [UIColor colorWithRed:0.15 green:0.95 blue:0.40 alpha:1]
+                             : hp01 > 0.25f ? [UIColor colorWithRed:1.0 green:0.78 blue:0.12 alpha:1]
+                             : [UIColor colorWithRed:1.0 green:0.22 blue:0.18 alpha:1];
+                CGContextSetFillColorWithColor(ctx, hc.CGColor);
+                CGFloat fill = barH * hp01;
+                CGContextFillRect(ctx, CGRectMake(bx, top + (barH - fill), barW, fill));
+                NSString* hpTxt = [NSString stringWithFormat:@"%.0f", p.hp];
+                [hpTxt drawAtPoint:CGPointMake(bx - 1.f, bot + 2.f)
+                  withAttributes:@{ NSFontAttributeName: [UIFont monospacedSystemFontOfSize:hpFs weight:UIFontWeightBold],
+                                    NSForegroundColorAttributeName: hc }];
+            }
+            // Armor bar
             if (p.armor >= 0.f) {
-                CGFloat abx = left - 17.f;
+                CGFloat abx = left - (barW * 2.f + gap + 6.f);
                 CGFloat ar01 = fminf(1.f, fmaxf(0.f, p.armor / 100.f));
-                CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.55].CGColor);
-                CGContextFillRect(ctx, CGRectMake(abx, top, barW, barH));
-                UIColor* ac = [UIColor colorWithRed:0.25 green:0.55 blue:1.0 alpha:1];
+                CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.5].CGColor);
+                CGContextFillRect(ctx, CGRectMake(abx - 0.5f, top - 0.5f, barW + 1.f, barH + 1.f));
+                UIColor* ac = [UIColor colorWithRed:0.30 green:0.65 blue:1.0 alpha:1];
                 CGContextSetFillColorWithColor(ctx, ac.CGColor);
                 CGFloat af = barH * ar01;
                 CGContextFillRect(ctx, CGRectMake(abx, top + (barH - af), barW, af));
-                NSString* arTxt = [NSString stringWithFormat:@"%.0f%%", ar01 * 100.f];
-                [arTxt drawAtPoint:CGPointMake(abx - 4, top - 12)
-                  withAttributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:hpFs],
+                NSString* arTxt = [NSString stringWithFormat:@"%.0f", p.armor];
+                [arTxt drawAtPoint:CGPointMake(abx - 1.f, top - hpFs - 3.f)
+                  withAttributes:@{ NSFontAttributeName: [UIFont monospacedSystemFontOfSize:hpFs weight:UIFontWeightBold],
                                     NSForegroundColorAttributeName: ac }];
             }
         }
@@ -912,6 +963,20 @@ static void run_aim(void* cam, void* camTr) {
             snap = g_list;
             for (auto& s : snap) if (s.local) localPc = s.obj;
         }
+        // is_mine can fail mid-round — fallback: player with photon isMine retry / first in list near camera
+        if (!ok_ptr(localPc) && !snap.empty()) {
+            for (auto& s : snap) {
+                if (ok_ptr(s.obj) && is_mine(s.obj)) { localPc = s.obj; break; }
+            }
+        }
+        if (!ok_ptr(localPc) && ok_ptr(camTr) && !snap.empty()) {
+            Vec3 cp = get_pos(camTr);
+            float bd = 1e9f;
+            for (auto& s : snap) {
+                float d = vdist(s.pos, cp);
+                if (d < bd && d < 3.5f) { bd = d; localPc = s.obj; }
+            }
+        }
 
         apply_recoil(localPc);
 
@@ -975,25 +1040,16 @@ static void run_aim(void* cam, void* camTr) {
             float d2 = sqrtf((sx-cx)*(sx-cx) + (sy-cy)*(sy-cy));
             if (!fovUnlimited && d2 > fovR) continue;
 
-            bool vis = is_visible(eye, bone);
-            // Silent: prefer visible (precise hit); fallback any in FOV
-            if (wantSilent) {
-                if (vis) {
-                    // visible targets beat wall targets: score with large bias
-                    float sc = d2 - 5000.f;
-                    if (sc < scoreSilent) {
-                        scoreSilent = sc; bestSilent = bone; haveSilent = true;
-                    }
-                } else if (!haveSilent || scoreSilent > 0.f) {
-                    // only take wall target if no visible yet
-                    if (d2 < scoreSilent) {
-                        scoreSilent = d2; bestSilent = bone; haveSilent = true;
-                    }
-                }
+            // Silent: always closest to crosshair in FOV (hits immediately)
+            if (wantSilent && d2 < scoreSilent) {
+                scoreSilent = d2; bestSilent = bone; haveSilent = true;
             }
-            // Aimbot: visible only
-            if (wantAim && vis) {
-                if (d2 < scoreAim) {
+            // Aimbot: only when visible (LOS); if check fails open → still aim
+            if (wantAim) {
+                bool vis = true;
+                if (g_aimVisible.load())
+                    vis = is_visible(eye, bone);
+                if (vis && d2 < scoreAim) {
                     scoreAim = d2; bestAim = bone; haveAim = true;
                 }
             }
