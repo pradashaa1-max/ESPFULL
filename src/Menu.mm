@@ -24,8 +24,8 @@ std::atomic<bool>  g_espSkel{false};
 std::atomic<bool>  g_espName{false};
 std::atomic<bool>  g_espHP{false};
 std::atomic<bool>  g_espWeapon{false};
-std::atomic<bool>  g_espBomb{true};
-std::atomic<bool>  g_espGrenade{true};
+std::atomic<bool>  g_espBomb{false};
+std::atomic<bool>  g_espGrenade{false};
 std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
@@ -33,7 +33,7 @@ std::atomic<float> g_recoilPct{0.f};      // 0=full, 100=zero
 std::atomic<bool>  g_hideRec{true};       // ON at launch
 std::atomic<bool>  g_skinChanger{false};
 std::atomic<bool>  g_menuOpen{false};
-std::atomic<float> g_fov{15.f};
+std::atomic<float> g_fov{25.f};
 std::atomic<float> g_smooth{4.5f};
 std::atomic<int>   g_bone{0};
 std::atomic<int>   g_lang{0};             // 0 EN 1 RU
@@ -274,9 +274,12 @@ static void applyHideRec(UIView* root) {
         }
         extern UIView* g_esp_view(void);
         UIView* esp = g_esp_view();
-        if (esp && esp.superview != container) {
-            [esp removeFromSuperview];
-            [container insertSubview:esp atIndex:0];
+        if (esp) {
+            esp.userInteractionEnabled = NO;
+            if (esp.superview != container) {
+                [esp removeFromSuperview];
+                [container insertSubview:esp atIndex:0];
+            }
         }
     } else {
         Astral_SecureRoot = nil;
@@ -453,10 +456,10 @@ static void rebuildContent() {
         y += row.bounds.size.height + 8;
     };
 
-    if (g_section == 0) { // Aim — separate Aimbot / Silent blocks
+    if (g_section == 0) { // Aimbot tab
         add(makeHeader(L("—— AIMBOT ——","—— АИМБОТ ——")));
         add(makeSwitch(L("Aimbot","Аимбот"),
-                       L("Moves crosshair to target only","Только ведёт прицел на цель"),
+                       L("Moves crosshair to enemy","Ведёт прицел на врага"),
                        g_aimbot.load(), ^(bool v){ g_aimbot=v; Astral_SaveConfig(); }));
         add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 15, ^(float v){
             g_smooth=v; Astral_SaveConfig();
@@ -464,24 +467,32 @@ static void rebuildContent() {
         add(makeSegment(L("Bone","Кость"),
                         g_lang.load()==1 ? @[@"Голова",@"Шея",@"Грудь"] : @[@"Head",@"Neck",@"Chest"],
                         g_bone.load(), ^(int v){ g_bone=v; Astral_SaveConfig(); }));
-
-        add(makeHeader(L("—— SILENT ——","—— САЙЛЕНТ ——")));
-        add(makeSwitch(L("Silent aim","Сайлент аим"),
-                       L("Hits without moving crosshair","Попадает без движения прицела"),
-                       g_silent.load(), ^(bool v){ g_silent=v; Astral_SaveConfig(); }));
-
-        add(makeHeader(L("—— SHARED ——","—— ОБЩЕЕ ——")));
         add(makeSwitch(L("Visible check","Видимость"),
                        L("Only if enemy visible","Только если враг виден"),
                        g_aimVisible.load(), ^(bool v){ g_aimVisible=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("FOV Circle","Круг FOV"),
-                       L("Draw only — FOV always filters","Только рисунок, FOV всегда фильтрует"),
+                       L("Draw FOV circle","Рисовать круг FOV"),
                        g_fovDraw.load(), ^(bool v){ g_fovDraw=v; Astral_SaveConfig(); }));
-        add(makeSlider(L("FOV size","Размер FOV"), g_fov.load(), 1, 30, ^(float v){
+        add(makeSlider(L("FOV (30=off)","FOV (30=выкл)"), g_fov.load(), 1, 30, ^(float v){
             g_fov=v; Astral_SaveConfig();
         }));
     }
-    else if (g_section == 1) { // Visuals
+    else if (g_section == 1) { // Silent tab (like Misc — own window)
+        add(makeHeader(L("—— SILENT ——","—— САЙЛЕНТ ——")));
+        add(makeSwitch(L("Silent aim","Сайлент аим"),
+                       L("Hits without moving crosshair","Попадает без движения прицела"),
+                       g_silent.load(), ^(bool v){ g_silent=v; Astral_SaveConfig(); }));
+        add(makeSegment(L("Bone","Кость"),
+                        g_lang.load()==1 ? @[@"Голова",@"Шея",@"Грудь"] : @[@"Head",@"Neck",@"Chest"],
+                        g_bone.load(), ^(int v){ g_bone=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("Visible check","Видимость"),
+                       L("Only if enemy visible","Только если враг виден"),
+                       g_aimVisible.load(), ^(bool v){ g_aimVisible=v; Astral_SaveConfig(); }));
+        add(makeSlider(L("FOV (30=off)","FOV (30=выкл)"), g_fov.load(), 1, 30, ^(float v){
+            g_fov=v; Astral_SaveConfig();
+        }));
+    }
+    else if (g_section == 2) { // Visuals
         add(makeSwitch(L("Box ESP","Бокс ESP"),
                        L("2D box around players","Рамка вокруг игроков"),
                        g_espBox.load(), ^(bool v){ g_espBox=v; Astral_SaveConfig(); }));
@@ -491,8 +502,8 @@ static void rebuildContent() {
         add(makeSwitch(L("Names","Ники"),
                        L("Player name tags","Никнеймы игроков"),
                        g_espName.load(), ^(bool v){ g_espName=v; Astral_SaveConfig(); }));
-        add(makeSwitch(L("Health bar","Здоровье"),
-                       L("HP bar + percent","Полоска HP + проценты"),
+        add(makeSwitch(L("Health + Armor","ХП + Армор"),
+                       L("Bars with % like mockup","Полоски с % как на макете"),
                        g_espHP.load(), ^(bool v){ g_espHP=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Weapon","Оружие"),
                        L("Weapon + ammo under player","Оружие + патроны"),
@@ -510,7 +521,7 @@ static void rebuildContent() {
                        L("Ignore teammates","Игнорировать союзников"),
                        g_espTeam.load(), ^(bool v){ g_espTeam=v; Astral_SaveConfig(); }));
     }
-    else if (g_section == 2) { // Misc
+    else if (g_section == 3) { // Misc
         add(makeSwitch(L("No Recoil","Без отдачи"),
                        L("Enable recoil control","Включить контроль отдачи"),
                        g_noRecoil.load(), ^(bool v){
@@ -561,8 +572,8 @@ void Astral_RebuildMenu(void) {
     // refresh tab titles + accent + content
     if (g_tabBtns) {
         NSArray* titles = g_lang.load()==1
-            ? @[@"Аим", @"Визуалы", @"Разное", @"Конфиг"]
-            : @[@"Aim", @"Visuals", @"Misc", @"Config"];
+            ? @[@"Аим", @"Сайлент", @"Визуалы", @"Разное", @"Конфиг"]
+            : @[@"Aim", @"Silent", @"Visuals", @"Misc", @"Config"];
         for (int i = 0; i < (int)g_tabBtns.count && i < (int)titles.count; i++) {
             [g_tabBtns[i] setTitle:titles[i] forState:UIControlStateNormal];
             g_tabBtns[i].backgroundColor = (i==g_section) ? Accent() : C(0.1,0.12,0.2,1);
@@ -604,15 +615,15 @@ static void buildPanel(UIView* host) {
     [g_panel addSubview:sub];
 
     // Tabs
-    NSArray* titles = @[@"Aim", @"Visuals", @"Misc", @"Config"];
+    NSArray* titles = g_lang.load()==1 ? @[@"Аим", @"Сайлент", @"Визуалы", @"Разное", @"Конфиг"] : @[@"Aim", @"Silent", @"Visuals", @"Misc", @"Config"];
     NSMutableArray* btns = [NSMutableArray array];
     CGFloat tx = 12, ty = 58;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < (int)titles.count; i++) {
         UIButton* b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.frame = CGRectMake(tx, ty, 74, 32);
+        b.frame = CGRectMake(tx, ty, 60, 32);
         [b setTitle:titles[i] forState:UIControlStateNormal];
         [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        b.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
         b.backgroundColor = (i==0) ? Accent() : C(0.1,0.12,0.2,1);
         b.layer.cornerRadius = 8;
         b.tag = i;
@@ -624,7 +635,7 @@ static void buildPanel(UIView* host) {
         }] forControlEvents:UIControlEventTouchUpInside];
         [g_panel addSubview:b];
         [btns addObject:b];
-        tx += 78;
+        tx += 64;
     }
     g_tabBtns = btns;
 
