@@ -488,10 +488,17 @@ static void rebuildContent() {
                        g_espTeam.load(), ^(bool v){ g_espTeam=v; Astral_SaveConfig(); }));
     }
     else if (g_section == 2) { // Misc
+        add(makeSwitch(L("No Recoil","Без отдачи"),
+                       L("Enable recoil control","Включить контроль отдачи"),
+                       g_noRecoil.load(), ^(bool v){
+                           g_noRecoil=v;
+                           if (v && g_recoilPct.load() < 1.f) g_recoilPct.store(100.f);
+                           Astral_SaveConfig();
+                       }));
         add(makeSlider(L("Recoil %","Отдача %"),
                        g_recoilPct.load(), 0, 100, ^(float v){
                            g_recoilPct=v;
-                           g_noRecoil.store(v >= 99.f);
+                           if (v >= 1.f) g_noRecoil.store(true);
                            Astral_SaveConfig();
                        }));
         add(makeSwitch(L("Hide from recording","Скрытие записи"),

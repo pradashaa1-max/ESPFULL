@@ -87,10 +87,16 @@ static Vec3 w2s(void* cam, Vec3 w) {
     if (!ok_ptr(cam) || !unity_base()) return o;
     using F = void (*)(void*, Vec3*, int, Vec3*);
     R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
+    // UIView is in points — Unity often returns points already on some builds.
+    // Prefer scale; if coords look huge (> screen*1.5) divide by nativeScale.
     UIScreen* sc = [UIScreen mainScreen];
-    float s = (float)sc.nativeScale;
-    if (s < 1.f) s = (float)sc.scale;
+    float s = (float)sc.scale;
     if (s < 1.f) s = 1.f;
+    CGFloat sw = sc.bounds.size.width;
+    if (o.x > sw * 1.4f || o.y > sc.bounds.size.height * 1.4f) {
+        float ns = (float)sc.nativeScale;
+        if (ns > 1.f) s = ns;
+    }
     o.x /= s;
     o.y /= s;
     return o;
@@ -266,27 +272,8 @@ static void refresh(void* camTr) {
                     if (ok_ptr(wc)) {
                         void* ns = *(void**)((char*)wc + 0x58);
                         if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                        // skip ammo path for grenades/bomb (not GunController layout)
-                        bool isNade = false;
-                        if (s.weapon[0]) {
-                            // HE, Flash, Smoke, Molotov, Bomb etc.
-                            const char* w = s.weapon;
-                            if (strstr(w, "HE") || strstr(w, "Flash") || strstr(w, "Smoke")
-                                || strstr(w, "Molly") || strstr(w, "Molotov")
-                                || strstr(w, "Bomb") || strstr(w, "Grenade")
-                                || strstr(w, "гранат") || strstr(w, "бомб"))
-                                isNade = true;
-                        }
-                        if (!isNade) {
-                            void* aObj0 = *(void**)((char*)wc + 0xE0);
-                            // BHEHACCGBBGGBCH is a small object — klass check via ok_ptr only
-                            if (ok_ptr(aObj0)) {
-                                int a = *(int*)((char*)aObj0 + 0x14);
-                                int b = *(int*)((char*)aObj0 + 0x10);
-                                if (a >= 0 && a <= 200) s.ammo = a;
-                                if (b >= 0 && b <= 200) s.ammoMax = b;
-                            }
-                        }
+                        // ammo disabled — offsets gave random values
+
                     }
                 }
             }
@@ -310,7 +297,7 @@ static void refresh(void* camTr) {
     std::vector<WorldSnap> wtmp;
     static int world_ctr = 0;
     // only every 15 refreshes, and only if we already have players (match started)
-    bool doWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty() && (++world_ctr >= 15);
+    bool doWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty() && (++world_ctr >= 25);
     if (doWorld) world_ctr = 0;
     if (doWorld && (IL2CPP().ready || IL2CPP().init())) {
         auto& api = IL2CPP();
@@ -466,7 +453,7 @@ UIView* g_esp_view(void) { return g_esp; }
     int localTeam = -1;
     for (auto& s : snap) if (s.local) localTeam = s.team;
 
-    const float headY = 1.55f;
+    const float headY = 1.70f;
 
     for (auto& p : snap) {
         if (p.local) continue;
@@ -483,10 +470,10 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 sh = w2s(cam, head);
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
-        CGFloat fx = sf.x - 3.f;
-        CGFloat hx = sh.x - 3.f;
-        CGFloat fy = H - sf.y - 3.f;
-        CGFloat hy = H - sh.y - 3.f;
+        CGFloat fx = sf.x;
+        CGFloat hx = sh.x;
+        CGFloat fy = H - sf.y;
+        CGFloat hy = H - sh.y;
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
@@ -625,8 +612,10 @@ void Astral_EnsureFOVOverlay(UIWindow* win) {
 // Never touch nested RecoilParameters* (that crashed).
 // Recoil: ONLY WeaponParameters multipliers — never GunController floats (those caused rapid fire)
 static void apply_recoil(void* localPc) {
+    if (!g_noRecoil.load()) return;
     float pct = g_recoilPct.load();
-    if (pct < 0.5f || !ok_ptr(localPc) || !unity_base()) return;
+    if (pct < 0.5f) pct = 100.f; // switch on with slider 0 → treat as full no-recoil
+    if (!ok_ptr(localPc) || !unity_base()) return;
 
     static float lastPct = -999.f;
     static void* lastParams = nullptr;
@@ -737,8 +726,8 @@ static void run_aim(void* cam, void* camTr) {
 
             Vec3 sc = w2s(cam, bone);
             if (sc.z < 0.05f) continue;
-            float sx = sc.x - 3.f;
-            float sy = (scr.height - sc.y) - 3.f;
+            float sx = sc.x;
+            float sy = (scr.height - sc.y);
             float d2 = sqrtf((sx-cx)*(sx-cx) + (sy-cy)*(sy-cy));
             if (d2 > fovR) continue;
             if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
@@ -801,7 +790,7 @@ void Astral_FeaturesTick() {
 
         bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load() || g_espHP.load() || g_espWeapon.load() || g_espBomb.load() || g_espGrenade.load();
         bool wantAim = g_aimbot.load();
-        bool wantRec = g_recoilPct.load() > 0.5f;
+        bool wantRec = g_noRecoil.load();
         bool wantFov = g_fovDraw.load();
         if (!wantEsp && !wantAim && !wantRec && !wantFov) return;
         if (!unity_base()) return;
@@ -818,7 +807,7 @@ void Astral_FeaturesTick() {
                 n = g_list.size();
             }
             // slower refresh on empty (match loading)
-            int every = (n == 0) ? 12 : 3;
+            int every = (n == 0) ? 20 : 5;
             if (n == 0 || ++g_ctr >= every) {
                 g_ctr = 0;
                 refresh(camTr);
