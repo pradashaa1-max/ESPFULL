@@ -31,7 +31,6 @@ std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
 std::atomic<float> g_recoilPct{0.f};      // 0=full, 100=zero
 std::atomic<bool>  g_hideRec{true};       // ON at launch
-std::atomic<bool>  g_skinChanger{false};
 std::atomic<bool>  g_menuOpen{false};
 std::atomic<float> g_fov{25.f};
 std::atomic<float> g_smooth{4.5f};
@@ -58,7 +57,6 @@ void Astral_SaveConfig(void) {
     [d setBool:g_noRecoil.load() forKey:@"astral_noRecoil"];
     [d setFloat:g_recoilPct.load() forKey:@"astral_recoilPct"];
     [d setBool:g_hideRec.load()  forKey:@"astral_hideRec"];
-    [d setBool:g_skinChanger.load() forKey:@"astral_skinChanger"];
     [d setFloat:g_fov.load()     forKey:@"astral_fov"];
     [d setFloat:g_smooth.load()  forKey:@"astral_smooth"];
     [d setInteger:g_bone.load()  forKey:@"astral_bone"];
@@ -88,7 +86,6 @@ void Astral_LoadConfig(void) {
     if (rp >= 0.f && rp <= 100.f) g_recoilPct.store(rp);
     else if (g_noRecoil.load()) g_recoilPct.store(100.f);
     g_hideRec.store([d boolForKey:@"astral_hideRec"]);
-    g_skinChanger.store([d boolForKey:@"astral_skinChanger"]);
     float f = [d floatForKey:@"astral_fov"];
     if (f > 0.5f && f < 40.f) g_fov.store(f);
     float sm = [d floatForKey:@"astral_smooth"];
@@ -542,10 +539,6 @@ static void rebuildContent() {
                            UIView* root = g_hostWin ? g_hostWin.rootViewController.view : nil;
                            applyHideRec(root);
                        }));
-        add(makeHeader(L("—— SKIN ——","—— СКИН ——")));
-        add(makeSwitch(L("Skin changer (visual)","Скинченжер (визуал)"),
-                       L("Local visual only in match","Только локально в катке"),
-                       g_skinChanger.load(), ^(bool v){ g_skinChanger=v; Astral_SaveConfig(); }));
     }
     else { // Config
         add(makeSegment(L("Language","Язык"),

@@ -272,47 +272,41 @@ static void refresh(void* camTr) {
         s.ammo = -1;
         s.ammoMax = -1;
         s.weapon[0] = 0;
-        // HP/Armor/Ammo — multi-path, only accept sane ranges
+        // HP/Armor: PlayerController 0x128/0x12C (props HDEEAEBEFHFHHDB / DDAAEECEBADEDBF)
+        // Ammo: ONLY on guns — reading GunController layout on HE/Flash = CRASH on buy
         @try {
-            auto takeHP = [&](int v) {
-                if (v >= 0 && v <= 100) s.hp = (float)v;
-            };
-            auto takeAR = [&](int v) {
-                if (v >= 0 && v <= 100) s.armor = (float)v;
-            };
-            void* net = *(void**)((char*)pc + Offsets::PC_networkController);
-            if (!ok_ptr(net)) net = *(void**)((char*)pc + 0x98);
-            if (ok_ptr(net)) {
-                // primary: NetworkController 0x90 health / 0x94 armor
-                takeHP(*(int*)((char*)net + 0x90));
-                takeAR(*(int*)((char*)net + 0x94));
-                // alt: float packed
-                if (s.hp < 0.f) {
-                    float fh = *(float*)((char*)net + 0x90);
-                    if (fh == fh && fh >= 0.f && fh <= 100.f) s.hp = fh;
-                }
-                if (s.armor < 0.f) {
-                    float fa = *(float*)((char*)net + 0x94);
-                    if (fa == fa && fa >= 0.f && fa <= 100.f) s.armor = fa;
-                }
-                // scan nearby ints once if still missing (0x88..0xC0)
-                if (s.hp < 0.f || s.armor < 0.f) {
-                    int found[4]; int nf = 0;
-                    for (size_t o = 0x88; o <= 0xC0 && nf < 4; o += 4) {
-                        int v = *(int*)((char*)net + o);
-                        if (v > 0 && v <= 100) found[nf++] = v;
-                    }
-                    if (s.hp < 0.f && nf >= 1) s.hp = (float)found[0];
-                    if (s.armor < 0.f && nf >= 2) s.armor = (float)found[1];
-                }
-            }
-            // try invoke NetworkController.get_BBBGCFDHBCBBFGC (RVA) if still no HP
-            if (s.hp < 0.f && ok_ptr(net) && unity_base()) {
+            // Path1: PC ints 0x128 / 0x12C
+            int hv = *(int*)((char*)pc + 0x128);
+            int ar = *(int*)((char*)pc + 0x12C);
+            if (hv >= 0 && hv <= 100) s.hp = (float)hv;
+            if (ar >= 0 && ar <= 100) s.armor = (float)ar;
+            // Path2: property getters (simple field return in dump)
+            if ((s.hp < 0.f || s.armor < 0.f) && unity_base()) {
                 @try {
-                    using F = int (*)(void*);
-                    int hv = R<F>(0x1621F20)(net);
-                    takeHP(hv);
+                    using FI = int (*)(void*);
+                    if (s.hp < 0.f) {
+                        int v = R<FI>(0x1623100)(pc); // get_HDEEAEBEFHFHHDB
+                        if (v >= 0 && v <= 100) s.hp = (float)v;
+                    }
+                    if (s.armor < 0.f) {
+                        int v = R<FI>(0x1623110)(pc); // get_DDAAEECEBADEDBF
+                        if (v >= 0 && v <= 100) s.armor = (float)v;
+                    }
                 } @catch (...) {}
+            }
+            // Path3: NetworkController snapshot ints
+            if (s.hp < 0.f || s.armor < 0.f) {
+                void* net = *(void**)((char*)pc + Offsets::PC_networkController);
+                if (ok_ptr(net)) {
+                    if (s.hp < 0.f) {
+                        int n = *(int*)((char*)net + 0x90);
+                        if (n >= 0 && n <= 100) s.hp = (float)n;
+                    }
+                    if (s.armor < 0.f) {
+                        int n = *(int*)((char*)net + 0x94);
+                        if (n >= 0 && n <= 100) s.armor = (float)n;
+                    }
+                }
             }
             void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
             if (ok_ptr(wry)) {
@@ -320,51 +314,40 @@ static void refresh(void* camTr) {
                 if (ok_ptr(wc)) {
                     void* ns = *(void**)((char*)wc + 0x58);
                     if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                    // path A: BHEHACCGBBGGBCH* @ 0xE0 / 0xE8 → value @ +0x14
-                    auto rdObj = [](void* base, size_t off) -> int {
-                        void* o = *(void**)((char*)base + off);
-                        if (!ok_ptr(o)) return -1;
-                        short s14 = *(short*)((char*)o + 0x14);
-                        if (s14 >= 0 && s14 <= 150) return (int)s14;
-                        int i14 = *(int*)((char*)o + 0x14);
-                        if (i14 >= 0 && i14 <= 150) return i14;
-                        // property backing sometimes @ +0x10
-                        short s10 = *(short*)((char*)o + 0x10);
-                        if (s10 >= 0 && s10 <= 150) return (int)s10;
-                        return -1;
-                    };
-                    int a = rdObj(wc, 0xE0);
-                    int b = rdObj(wc, 0xE8);
-                    // path B: plain ints on GunController 0xD8 / 0xDC
-                    if (a < 0) {
-                        int i0 = *(int*)((char*)wc + 0xD8);
-                        int i1 = *(int*)((char*)wc + 0xDC);
-                        if (i0 >= 0 && i0 <= 150) a = i0;
-                        if (i1 >= 0 && i1 <= 150) b = i1;
-                    }
-                    // path C: short getter RVA get_BFEDHEDEGAHDFBF
-                    if (a < 0 && unity_base()) {
-                        @try {
-                            using FS = short (*)(void*);
-                            short sv = R<FS>(0x17FA840)(wc);
-                            if (sv >= 0 && sv <= 150) a = (int)sv;
-                        } @catch (...) {}
-                    }
-                    // path D: GunParameters capacity nearby
-                    void* gp = *(void**)((char*)wc + 0x118);
-                    if (ok_ptr(gp) && b < 0) {
-                        for (size_t o : {0x78ul, 0x7Cul, 0x80ul, 0x88ul, 0x90ul}) {
-                            int m = *(int*)((char*)gp + o);
-                            if (m >= 5 && m <= 100) { b = m; break; }
-                            short ms = *(short*)((char*)gp + o);
-                            if (ms >= 5 && ms <= 100) { b = (int)ms; break; }
+                    // hard skip nades/knife/bomb — never touch GunController fields on them
+                    bool isGun = false;
+                    if (s.weapon[0]) {
+                        const char* bad[] = {"HE","Flash","Smoke","Molly","Incend","Grenade","Bomb","Knife","knife","C4", nullptr};
+                        isGun = true;
+                        for (int bi = 0; bad[bi]; bi++) {
+                            if (strstr(s.weapon, bad[bi])) { isGun = false; break; }
                         }
                     }
-                    if (a >= 0) {
-                        s.ammo = a;
-                        if (b >= a && b <= 150) s.ammoMax = b;
-                        else if (b >= 0 && b <= 150) s.ammoMax = b;
-                        else s.ammoMax = a;
+                    if (isGun) {
+                        // BHEHACCGBBGGBCH* @ 0xE0 / 0xE8 value @ +0x14
+                        auto rdObj = [](void* base, size_t off) -> int {
+                            void* o = *(void**)((char*)base + off);
+                            if (!ok_ptr(o)) return -1;
+                            short s14 = *(short*)((char*)o + 0x14);
+                            if (s14 >= 0 && s14 <= 150) return (int)s14;
+                            int i14 = *(int*)((char*)o + 0x14);
+                            if (i14 >= 0 && i14 <= 150) return i14;
+                            return -1;
+                        };
+                        int a = rdObj(wc, 0xE0);
+                        int b = rdObj(wc, 0xE8);
+                        if (a < 0) {
+                            int i0 = *(int*)((char*)wc + 0xD8);
+                            if (i0 >= 0 && i0 <= 150) a = i0;
+                        }
+                        if (b < 0) {
+                            int i1 = *(int*)((char*)wc + 0xDC);
+                            if (i1 >= 0 && i1 <= 150) b = i1;
+                        }
+                        if (a >= 0) {
+                            s.ammo = a;
+                            s.ammoMax = (b >= a && b <= 150) ? b : a;
+                        }
                     }
                 }
             }
@@ -384,11 +367,12 @@ static void refresh(void* camTr) {
     if (mines == 0 && !tmp.empty() && bestD < 5.f)
         tmp[bestIdx].local = true;
 
-    // Bomb/grenade every player-refresh (no extra throttle). Timers read softly.
+    // World ESP: throttle FOT hard (hangs on flying HE). Timers only bomb/smoke/molly.
     std::vector<WorldSnap> wtmp;
-    bool wantWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty();
     static int world_ctr = 0;
-    bool doWorld = wantWorld && ((++world_ctr % 3) == 0); // every 3rd refresh, still fast
+    bool wantWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty();
+    // every 8th player-refresh — FOT every frame freezes when HE is in air
+    bool doWorld = wantWorld && ((++world_ctr % 8) == 0);
     if (doWorld && (IL2CPP().ready || IL2CPP().init())) {
         auto& api = IL2CPP();
         auto collectSafe = [&](const char* ns, const char* cls, bool isBomb) {
@@ -412,8 +396,9 @@ static void refresh(void* camTr) {
                 if (exc || !ok_ptr(a)) return;
                 std::vector<void*> arr;
                 push_array(a, arr, api);
+                int added = 0;
                 for (void* o : arr) {
-                    if (!ok_ptr(o)) continue;
+                    if (!ok_ptr(o) || added >= 6) break;
                     @try {
                         void* tr = get_tr(o);
                         if (!ok_ptr(tr)) continue;
@@ -425,47 +410,70 @@ static void refresh(void* camTr) {
                         if (isBomb) {
                             snprintf(w.label, sizeof(w.label), "BOMB");
                             @try {
-                                // PlantedBombController: float remaining candidates
-                                for (size_t to : {0x40ul, 0xA8ul}) {
-                                    float f = *(float*)((char*)o + to);
-                                    if (f == f && f > 0.4f && f <= 45.f) {
-                                        w.timer = f;
-                                        snprintf(w.label, sizeof(w.label), "BOMB %.0fs", f);
-                                        break;
-                                    }
+                                float f40 = *(float*)((char*)o + 0x40);
+                                float fA8 = *(float*)((char*)o + 0xA8);
+                                float t = -1.f;
+                                if (f40 == f40 && f40 > 0.5f && f40 <= 45.f) t = f40;
+                                else if (fA8 == fA8 && fA8 > 0.5f && fA8 <= 45.f) t = fA8;
+                                if (t > 0.f) {
+                                    w.timer = t;
+                                    snprintf(w.label, sizeof(w.label), "BOMB %.0fs", t);
                                 }
                             } @catch (...) {}
                         } else {
-                            snprintf(w.label, sizeof(w.label), "HE");
+                            // Grenade: classify from parameters name — HE = pos only (no timer, no hang)
+                            char tmpn[24]{};
                             @try {
-                                void* gp = *(void**)((char*)o + 0x18);
-                                char tmpn[20]{};
+                                void* gp = *(void**)((char*)o + 0x18); // GrenadeParameters*
                                 if (ok_ptr(gp)) {
                                     void* ns2 = *(void**)((char*)gp + 0x20);
+                                    if (!ok_ptr(ns2)) ns2 = *(void**)((char*)gp + 0x18);
                                     if (ok_ptr(ns2)) read_str(ns2, tmpn, sizeof(tmpn));
                                 }
-                                float t64 = *(float*)((char*)o + 0x64);
-                                float t50 = *(float*)((char*)o + 0x50);
-                                float fuse = -1.f;
-                                if (t64 == t64 && t64 > 0.05f && t64 <= 12.f) fuse = t64;
-                                else if (t50 == t50 && t50 > 0.05f && t50 <= 12.f) fuse = t50;
-                                const char* tag = "HE";
-                                if (tmpn[0]) {
-                                    if (strstr(tmpn, "Smoke") || strstr(tmpn, "smoke")) tag = "SMOKE";
-                                    else if (strstr(tmpn, "Flash") || strstr(tmpn, "flash")) tag = "FLASH";
-                                    else if (strstr(tmpn, "Molly") || strstr(tmpn, "Incend") || strstr(tmpn, "Fire")) tag = "MOLLY";
-                                    else if (strstr(tmpn, "HE") || strstr(tmpn, "Frag")) tag = "HE";
-                                }
-                                if (fuse >= 0.f) {
-                                    w.timer = fuse;
-                                    snprintf(w.label, sizeof(w.label), "%s %.1fs", tag, fuse);
-                                } else {
-                                    snprintf(w.label, sizeof(w.label), "%s", tag);
-                                }
-                            } @catch (...) {}
+                            } @catch (...) { tmpn[0] = 0; }
+
+                            bool isSmoke = tmpn[0] && (strstr(tmpn, "Smoke") || strstr(tmpn, "smoke"));
+                            bool isMolly = tmpn[0] && (strstr(tmpn, "Molly") || strstr(tmpn, "Incend")
+                                || strstr(tmpn, "Fire") || strstr(tmpn, "molly"));
+                            bool isFlash = tmpn[0] && (strstr(tmpn, "Flash") || strstr(tmpn, "flash"));
+                            bool isHE = !isSmoke && !isMolly && !isFlash; // default HE / unknown
+
+                            if (isSmoke) {
+                                snprintf(w.label, sizeof(w.label), "SMOKE");
+                                @try {
+                                    float t64 = *(float*)((char*)o + 0x64);
+                                    float t50 = *(float*)((char*)o + 0x50);
+                                    float fuse = -1.f;
+                                    if (t64 == t64 && t64 > 0.05f && t64 <= 20.f) fuse = t64;
+                                    else if (t50 == t50 && t50 > 0.05f && t50 <= 20.f) fuse = t50;
+                                    if (fuse > 0.f) {
+                                        w.timer = fuse;
+                                        snprintf(w.label, sizeof(w.label), "SMOKE %.1fs", fuse);
+                                    }
+                                } @catch (...) {}
+                            } else if (isMolly) {
+                                snprintf(w.label, sizeof(w.label), "MOLLY");
+                                @try {
+                                    float t64 = *(float*)((char*)o + 0x64);
+                                    float t50 = *(float*)((char*)o + 0x50);
+                                    float fuse = -1.f;
+                                    if (t64 == t64 && t64 > 0.05f && t64 <= 15.f) fuse = t64;
+                                    else if (t50 == t50 && t50 > 0.05f && t50 <= 15.f) fuse = t50;
+                                    if (fuse > 0.f) {
+                                        w.timer = fuse;
+                                        snprintf(w.label, sizeof(w.label), "MOLLY %.1fs", fuse);
+                                    }
+                                } @catch (...) {}
+                            } else if (isFlash) {
+                                // flash: label only, no timer
+                                snprintf(w.label, sizeof(w.label), "FLASH");
+                            } else {
+                                // HE flying: position + label ONLY — field reads caused freeze
+                                snprintf(w.label, sizeof(w.label), "HE");
+                            }
                         }
                         wtmp.push_back(w);
-                        if (wtmp.size() > 8) break;
+                        added++;
                     } @catch (...) {}
                 }
             } @catch (...) {}
@@ -477,7 +485,7 @@ static void refresh(void* camTr) {
         }
         if (g_espGrenade.load()) {
             collectSafe("Axlebolt.Standoff.Inventory.Grenade", "DroppedGrenadeController", false);
-            if (wtmp.size() < 8)
+            if (wtmp.size() < 6)
                 collectSafe("", "DroppedGrenadeController", false);
         }
     }
@@ -906,22 +914,6 @@ static void run_aim(void* cam, void* camTr) {
         }
 
         apply_recoil(localPc);
-        // Visual skin: local only — soft emission pulse on weapon renderers (no inventory write)
-        if (g_skinChanger.load() && ok_ptr(localPc)) {
-            static int skin_ctr = 0;
-            if ((++skin_ctr % 30) == 0) {
-                @try {
-                    void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
-                    if (!ok_ptr(wry)) goto skin_done;
-                    void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
-                    if (!ok_ptr(wc)) goto skin_done;
-                    // WeaponMaterialController often @ WeaponController+0xB0
-                    void* mat = *(void**)((char*)wc + 0xB0);
-                    (void)mat; // reserved for full skin id swap when inventory list is wired
-                } @catch (...) {}
-                skin_done: ;
-            }
-        }
 
         // Aimbot and Silent are independent. FOV value always filters; g_fovDraw only draws the circle.
         bool wantAim = g_aimbot.load();
