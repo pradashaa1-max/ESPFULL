@@ -87,16 +87,10 @@ static Vec3 w2s(void* cam, Vec3 w) {
     if (!ok_ptr(cam) || !unity_base()) return o;
     using F = void (*)(void*, Vec3*, int, Vec3*);
     R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
-    // UIView is in points — Unity often returns points already on some builds.
-    // Prefer scale; if coords look huge (> screen*1.5) divide by nativeScale.
     UIScreen* sc = [UIScreen mainScreen];
-    float s = (float)sc.scale;
+    float s = (float)sc.nativeScale;
+    if (s < 1.f) s = (float)sc.scale;
     if (s < 1.f) s = 1.f;
-    CGFloat sw = sc.bounds.size.width;
-    if (o.x > sw * 1.4f || o.y > sc.bounds.size.height * 1.4f) {
-        float ns = (float)sc.nativeScale;
-        if (ns > 1.f) s = ns;
-    }
     o.x /= s;
     o.y /= s;
     return o;
@@ -264,7 +258,8 @@ static void refresh(void* camTr) {
         s.weapon[0] = 0;
         // optional extras — never crash match enter
         @try {
-            if (g_espHP.load()) s.hp = read_hp01(pc);
+            // HP read disabled — was random/bugged
+            s.hp = -1.f;
             if (g_espWeapon.load()) {
                 void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
                 if (ok_ptr(wry)) {
@@ -453,7 +448,7 @@ UIView* g_esp_view(void) { return g_esp; }
     int localTeam = -1;
     for (auto& s : snap) if (s.local) localTeam = s.team;
 
-    const float headY = 1.70f;
+    const float headY = 1.55f;
 
     for (auto& p : snap) {
         if (p.local) continue;
@@ -470,10 +465,10 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 sh = w2s(cam, head);
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
-        CGFloat fx = sf.x;
-        CGFloat hx = sh.x;
-        CGFloat fy = H - sf.y;
-        CGFloat hy = H - sh.y;
+        CGFloat fx = sf.x - 3.f;
+        CGFloat hx = sh.x - 3.f;
+        CGFloat fy = H - sf.y - 3.f;
+        CGFloat hy = H - sh.y - 3.f;
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
@@ -726,8 +721,8 @@ static void run_aim(void* cam, void* camTr) {
 
             Vec3 sc = w2s(cam, bone);
             if (sc.z < 0.05f) continue;
-            float sx = sc.x;
-            float sy = (scr.height - sc.y);
+            float sx = sc.x - 3.f;
+            float sy = (scr.height - sc.y) - 3.f;
             float d2 = sqrtf((sx-cx)*(sx-cx) + (sy-cy)*(sy-cy));
             if (d2 > fovR) continue;
             if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
@@ -763,8 +758,14 @@ static void run_aim(void* cam, void* camTr) {
         while (dy < -180.f) dy += 360.f;
 
         if (g_silent.load()) {
+            // hard lock — no smooth, full angle replace
             *aPitch = pitch;
             *aYaw   = curY + dy;
+            // also write possible duplicate angle slots used by some builds
+            float* p2 = (float*)((char*)aimCtrl + 0x16C);
+            float* y2 = (float*)((char*)aimCtrl + 0x170);
+            if (*p2 == *p2 && fabsf(*p2) < 400.f) *p2 = pitch;
+            if (*y2 == *y2 && fabsf(*y2) < 800.f) *y2 = *aYaw;
         } else {
             *aPitch = curP + (pitch - curP) / sm;
             *aYaw   = curY + dy / sm;
