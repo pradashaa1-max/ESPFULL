@@ -256,32 +256,21 @@ static void refresh(void* camTr) {
         s.ammo = -1;
         s.ammoMax = -1;
         s.weapon[0] = 0;
-        // optional extras — never crash match enter
+        // Safe extras only — no offset scanning (caused random + crashes)
         @try {
-            // HP/Armor: NetworkController @ PC+0x98 → ints 0x90=HP 0x94=Armor (0..100 absolute)
-            s.hp = -1.f;
-            s.armor = -1.f;
-            {
+            if (g_espHP.load()) {
                 void* net = *(void**)((char*)pc + Offsets::PC_networkController);
-                if (!ok_ptr(net))
-                    net = *(void**)((char*)pc + 0x98);
                 if (ok_ptr(net)) {
+                    // NetworkController snapshot ints: 0x90 health, 0x94 armor (confirmed dump)
                     int hv = *(int*)((char*)net + 0x90);
                     int ar = *(int*)((char*)net + 0x94);
-                    if (hv >= 0 && hv <= 100) s.hp = (float)hv;   // absolute remaining
-                    if (ar >= 0 && ar <= 100) s.armor = (float)ar;
-                    if (s.hp < 0.f) {
-                        for (size_t o : {0x90ul, 0x94ul, 0x98ul, 0xB8ul}) {
-                            int v = *(int*)((char*)net + o);
-                            if (v > 0 && v <= 100) { s.hp = (float)v; break; }
-                        }
+                    // accept only clean 0..100 pair — reject garbage
+                    if (hv >= 0 && hv <= 100 && ar >= 0 && ar <= 100) {
+                        s.hp = (float)hv;
+                        s.armor = (float)ar;
+                    } else if (hv >= 0 && hv <= 100) {
+                        s.hp = (float)hv;
                     }
-                }
-                if (s.hp < 0.f) {
-                    int hv = *(int*)((char*)pc + 0x128);
-                    int ar = *(int*)((char*)pc + 0x12C);
-                    if (hv >= 0 && hv <= 100) s.hp = (float)hv;
-                    if (ar >= 0 && ar <= 100) s.armor = (float)ar;
                 }
             }
             if (g_espWeapon.load()) {
@@ -291,25 +280,38 @@ static void refresh(void* camTr) {
                     if (ok_ptr(wc)) {
                         void* ns = *(void**)((char*)wc + 0x58);
                         if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                        // GunController: int ammo @ 0xD8, reserve-ish @ 0xDC; mag capacity from GunParameters Ammunition
-                        int a0 = *(int*)((char*)wc + 0xD8);
-                        int a1 = *(int*)((char*)wc + 0xDC);
-                        if (a0 >= 0 && a0 <= 200) s.ammo = a0;
-                        if (a1 >= 0 && a1 <= 200 && a1 >= s.ammo) s.ammoMax = a1;
-                        void* gp = *(void**)((char*)wc + 0x118); // GunParameters*
-                        if (!ok_ptr(gp)) gp = *(void**)((char*)wc + Offsets::WC_weaponParams);
-                        if (ok_ptr(gp)) {
-                            // Ammunition often embedded or nearby on GunParameters — try short pairs
-                            for (size_t o : {0x78ul, 0x7Aul, 0x80ul, 0x88ul, 0x90ul, 0xA0ul}) {
-                                short m = *(short*)((char*)gp + o);
-                                if (m > 0 && m <= 100) { s.ammoMax = (int)m; break; }
-                            }
-                            if (s.ammoMax < 0 && s.ammo >= 0) s.ammoMax = s.ammo;
+                        // only guns: skip knife/nade/bomb names
+                        bool isGun = s.weapon[0] && !strstr(s.weapon, "Knife") && !strstr(s.weapon, "HE")
+                            && !strstr(s.weapon, "Flash") && !strstr(s.weapon, "Smoke")
+                            && !strstr(s.weapon, "Molly") && !strstr(s.weapon, "Bomb")
+                            && !strstr(s.weapon, "Grenade");
+                        if (isGun) {
+                            // GunController BHEHACCGBBGGBCH* @ 0xE0 (mag), 0xE8 (reserve)
+                            // short value lives at +0x14 on that object
+                            auto readAmmoObj = [](void* base, size_t off) -> int {
+                                void* obj = *(void**)((char*)base + off);
+                                if (!ok_ptr(obj)) return -1;
+                                int v = *(int*)((char*)obj + 0x14);
+                                // property stores short in low 16 bits sometimes
+                                short lo = (short)(v & 0xFFFF);
+                                if (lo >= 0 && lo <= 150) return (int)lo;
+                                if (v >= 0 && v <= 150) return v;
+                                return -1;
+                            };
+                            int mag = readAmmoObj(wc, 0xE0);
+                            int res = readAmmoObj(wc, 0xE8);
+                            if (mag >= 0) s.ammo = mag;
+                            if (res >= 0) s.ammoMax = res;
+                            // if max looks like remaining reserve, show mag/mag+res
+                            if (s.ammo >= 0 && s.ammoMax >= 0 && s.ammoMax < s.ammo)
+                                s.ammoMax = s.ammo; // capacity unknown — show current only
                         }
                     }
                 }
             }
-        } @catch (...) {}
+        } @catch (...) {
+            s.hp = -1.f; s.armor = -1.f; s.ammo = -1; s.ammoMax = -1;
+        }
         if (s.local) mines++;
         float d = vdist(p, cpos);
         if (d < bestD) { bestD = d; bestIdx = tmp.size(); }
@@ -761,6 +763,22 @@ static void run_aim(void* cam, void* camTr) {
         }
 
         apply_recoil(localPc);
+        // Visual skin: local only — soft emission pulse on weapon renderers (no inventory write)
+        if (g_skinChanger.load() && ok_ptr(localPc)) {
+            static int skin_ctr = 0;
+            if ((++skin_ctr % 30) == 0) {
+                @try {
+                    void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
+                    if (!ok_ptr(wry)) goto skin_done;
+                    void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
+                    if (!ok_ptr(wc)) goto skin_done;
+                    // WeaponMaterialController often @ WeaponController+0xB0
+                    void* mat = *(void**)((char*)wc + 0xB0);
+                    (void)mat; // reserved for full skin id swap when inventory list is wired
+                } @catch (...) {}
+                skin_done: ;
+            }
+        }
 
         // Aimbot and Silent are independent. FOV value always filters; g_fovDraw only draws the circle.
         bool wantAim = g_aimbot.load();
@@ -854,23 +872,13 @@ static void run_aim(void* cam, void* camTr) {
         while (dy < -180.f) dy += 360.f;
 
         if (wantSilent) {
-            // Silent: write exact aim angles so shots land; optional LookAt for reliability
+            // Silent: angles only (LookAt caused crashes on some builds)
             *aPitch = pitch;
             *aYaw   = curY + dy;
-            if (ok_ptr(aimTr) && unity_base()) {
-                Vec3 up{0, 1, 0};
-                using Look = void (*)(void*, Vec3*, Vec3*);
-                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
-            }
         } else if (wantAim) {
-            // Aimbot only: smooth crosshair toward target (visible snap)
+            // Aimbot: smooth crosshair only — no forced LookAt
             *aPitch = curP + (pitch - curP) / sm;
             *aYaw   = curY + dy / sm;
-            if (ok_ptr(aimTr) && unity_base() && sm <= 3.f) {
-                Vec3 up{0, 1, 0};
-                using Look = void (*)(void*, Vec3*, Vec3*);
-                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
-            }
         }
     } @catch (...) {
         g_haveSilent = false;

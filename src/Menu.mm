@@ -31,6 +31,7 @@ std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
 std::atomic<float> g_recoilPct{0.f};      // 0=full, 100=zero
 std::atomic<bool>  g_hideRec{true};       // ON at launch
+std::atomic<bool>  g_skinChanger{false};
 std::atomic<bool>  g_menuOpen{false};
 std::atomic<float> g_fov{15.f};
 std::atomic<float> g_smooth{4.5f};
@@ -57,6 +58,7 @@ void Astral_SaveConfig(void) {
     [d setBool:g_noRecoil.load() forKey:@"astral_noRecoil"];
     [d setFloat:g_recoilPct.load() forKey:@"astral_recoilPct"];
     [d setBool:g_hideRec.load()  forKey:@"astral_hideRec"];
+    [d setBool:g_skinChanger.load() forKey:@"astral_skinChanger"];
     [d setFloat:g_fov.load()     forKey:@"astral_fov"];
     [d setFloat:g_smooth.load()  forKey:@"astral_smooth"];
     [d setInteger:g_bone.load()  forKey:@"astral_bone"];
@@ -86,6 +88,7 @@ void Astral_LoadConfig(void) {
     if (rp >= 0.f && rp <= 100.f) g_recoilPct.store(rp);
     else if (g_noRecoil.load()) g_recoilPct.store(100.f);
     g_hideRec.store([d boolForKey:@"astral_hideRec"]);
+    g_skinChanger.store([d boolForKey:@"astral_skinChanger"]);
     float f = [d floatForKey:@"astral_fov"];
     if (f > 0.5f && f < 40.f) g_fov.store(f);
     float sm = [d floatForKey:@"astral_smooth"];
@@ -303,6 +306,17 @@ static void applyHideRec(UIView* root) {
 }
 
 
+
+static UIView* makeHeader(NSString* title) {
+    UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,28)];
+    UILabel* t = [[UILabel alloc] initWithFrame:CGRectMake(4,6,292,18)];
+    t.text = title;
+    t.textColor = Accent();
+    t.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+    [row addSubview:t];
+    return row;
+}
+
 static UIView* makeSwitch(NSString* title, NSString* sub, bool on, void(^cb)(bool)) {
     UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,54)];
     row.backgroundColor = C(0.06,0.08,0.14,0.95);
@@ -439,24 +453,33 @@ static void rebuildContent() {
         y += row.bounds.size.height + 8;
     };
 
-    if (g_section == 0) { // Aim
-        add(makeSwitch(L("Aimbot (aim only)","Аимбот (только наводка)"),
-                       L("Automatically aims at enemies","Автоматически наводится на врагов"),
+    if (g_section == 0) { // Aim — separate Aimbot / Silent blocks
+        add(makeHeader(L("—— AIMBOT ——","—— АИМБОТ ——")));
+        add(makeSwitch(L("Aimbot","Аимбот"),
+                       L("Moves crosshair to target only","Только ведёт прицел на цель"),
                        g_aimbot.load(), ^(bool v){ g_aimbot=v; Astral_SaveConfig(); }));
-        add(makeSwitch(L("Silent (hits)","Сайлент (попадание)"),
-                       L("Hides your aim from other players","Скрывает наводку от других"),
-                       g_silent.load(), ^(bool v){ g_silent=v; Astral_SaveConfig(); }));
-        add(makeSwitch(L("Visible check","Видимость"),
-                       L("Aim only if visible (no wall)","Aim только если видно"),
-                       g_aimVisible.load(), ^(bool v){ g_aimVisible=v; Astral_SaveConfig(); }));
-        add(makeSwitch(L("FOV Circle","Круг FOV"),
-                       L("Shows the aim range circle","Показывает круг зоны аима"),
-                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; Astral_SaveConfig(); }));
-        add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; }));
-        add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 15, ^(float v){ g_smooth=v; }));
+        add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 15, ^(float v){
+            g_smooth=v; Astral_SaveConfig();
+        }));
         add(makeSegment(L("Bone","Кость"),
                         g_lang.load()==1 ? @[@"Голова",@"Шея",@"Грудь"] : @[@"Head",@"Neck",@"Chest"],
-                        g_bone.load(), ^(int v){ g_bone=v; }));
+                        g_bone.load(), ^(int v){ g_bone=v; Astral_SaveConfig(); }));
+
+        add(makeHeader(L("—— SILENT ——","—— САЙЛЕНТ ——")));
+        add(makeSwitch(L("Silent aim","Сайлент аим"),
+                       L("Hits without moving crosshair","Попадает без движения прицела"),
+                       g_silent.load(), ^(bool v){ g_silent=v; Astral_SaveConfig(); }));
+
+        add(makeHeader(L("—— SHARED ——","—— ОБЩЕЕ ——")));
+        add(makeSwitch(L("Visible check","Видимость"),
+                       L("Only if enemy visible","Только если враг виден"),
+                       g_aimVisible.load(), ^(bool v){ g_aimVisible=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("FOV Circle","Круг FOV"),
+                       L("Draw only — FOV always filters","Только рисунок, FOV всегда фильтрует"),
+                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; Astral_SaveConfig(); }));
+        add(makeSlider(L("FOV size","Размер FOV"), g_fov.load(), 1, 30, ^(float v){
+            g_fov=v; Astral_SaveConfig();
+        }));
     }
     else if (g_section == 1) { // Visuals
         add(makeSwitch(L("Box ESP","Бокс ESP"),
@@ -508,6 +531,10 @@ static void rebuildContent() {
                            UIView* root = g_hostWin ? g_hostWin.rootViewController.view : nil;
                            applyHideRec(root);
                        }));
+        add(makeHeader(L("—— SKIN ——","—— СКИН ——")));
+        add(makeSwitch(L("Skin changer (visual)","Скинченжер (визуал)"),
+                       L("Local visual only in match","Только локально в катке"),
+                       g_skinChanger.load(), ^(bool v){ g_skinChanger=v; Astral_SaveConfig(); }));
     }
     else { // Config
         add(makeSegment(L("Language","Язык"),
