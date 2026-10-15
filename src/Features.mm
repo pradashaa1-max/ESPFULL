@@ -16,12 +16,19 @@ extern UIView* Astral_SecureRoot;
 
 struct Vec3 { float x, y, z; };
 struct RayHit {
-    float px, py, pz;
-    float nx, ny, nz;
+    // Unity RaycastHit-ish layout (padded — wrong size was a crash source)
+    float px, py, pz;       // point
+    float nx, ny, nz;       // normal
     unsigned face;
     float distance;
+    void* triangleIndex_pad;
+    float bary_x, bary_y, bary_z;
+    float uv_x, uv_y;
+    float uv2_x, uv2_y;
+    void* transform;
+    void* rigidbody;
     void* collider;
-    // rest ignored
+    char  _pad[32];
 };
 
 static inline float vlen(Vec3 v) { return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z); }
@@ -96,16 +103,25 @@ static Vec3 w2s(void* cam, Vec3 w) {
     return o;
 }
 
-// Visible: Linecast cam→target. If hit closer than target - blocked.
+// Visible: Physics.Linecast. Soft — on any fault treat as visible=false for aimbot safety.
 static bool is_visible(Vec3 from, Vec3 to) {
-    if (!unity_base()) return true;
-    RayHit hit{};
-    // Physics.Linecast(start, end, out hit, layerMask) RVA 0x336EA3C
-    using F = bool (*)(Vec3*, Vec3*, RayHit*, int);
-    bool blocked = R<F>(0x336EA3C)(&from, &to, &hit, ~0);
-    if (!blocked) return true;
-    float need = vdist(from, to) - 0.35f;
-    return hit.distance >= need;
+    if (!unity_base()) return false;
+    @try {
+        // nudge start forward so we don't hit local player capsule
+        Vec3 dir = vnorm(vsub(to, from));
+        Vec3 start = {from.x + dir.x * 0.35f, from.y + dir.y * 0.35f + 0.1f, from.z + dir.z * 0.35f};
+        RayHit hit{};
+        // layerMask: Default+Static world typical bits; avoid ~0 (hits everything / crashy)
+        const int mask = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 8) | (1 << 9) | (1 << 10);
+        using F = bool (*)(Vec3*, Vec3*, RayHit*, int);
+        bool hitSomething = R<F>(0x336EA3C)(&start, &to, &hit, mask);
+        if (!hitSomething) return true;
+        float need = vdist(start, to) - 0.45f;
+        if (need < 0.1f) need = 0.1f;
+        return hit.distance >= need;
+    } @catch (...) {
+        return false;
+    }
 }
 
 struct PSnap {
@@ -256,14 +272,47 @@ static void refresh(void* camTr) {
         s.ammo = -1;
         s.ammoMax = -1;
         s.weapon[0] = 0;
-        // HP/Armor + weapon + ammo (strict 0..100 / 0..150)
+        // HP/Armor/Ammo — multi-path, only accept sane ranges
         @try {
+            auto takeHP = [&](int v) {
+                if (v >= 0 && v <= 100) s.hp = (float)v;
+            };
+            auto takeAR = [&](int v) {
+                if (v >= 0 && v <= 100) s.armor = (float)v;
+            };
             void* net = *(void**)((char*)pc + Offsets::PC_networkController);
+            if (!ok_ptr(net)) net = *(void**)((char*)pc + 0x98);
             if (ok_ptr(net)) {
-                int hv = *(int*)((char*)net + 0x90);
-                int ar = *(int*)((char*)net + 0x94);
-                if (hv >= 0 && hv <= 100) s.hp = (float)hv;
-                if (ar >= 0 && ar <= 100) s.armor = (float)ar;
+                // primary: NetworkController 0x90 health / 0x94 armor
+                takeHP(*(int*)((char*)net + 0x90));
+                takeAR(*(int*)((char*)net + 0x94));
+                // alt: float packed
+                if (s.hp < 0.f) {
+                    float fh = *(float*)((char*)net + 0x90);
+                    if (fh == fh && fh >= 0.f && fh <= 100.f) s.hp = fh;
+                }
+                if (s.armor < 0.f) {
+                    float fa = *(float*)((char*)net + 0x94);
+                    if (fa == fa && fa >= 0.f && fa <= 100.f) s.armor = fa;
+                }
+                // scan nearby ints once if still missing (0x88..0xC0)
+                if (s.hp < 0.f || s.armor < 0.f) {
+                    int found[4]; int nf = 0;
+                    for (size_t o = 0x88; o <= 0xC0 && nf < 4; o += 4) {
+                        int v = *(int*)((char*)net + o);
+                        if (v > 0 && v <= 100) found[nf++] = v;
+                    }
+                    if (s.hp < 0.f && nf >= 1) s.hp = (float)found[0];
+                    if (s.armor < 0.f && nf >= 2) s.armor = (float)found[1];
+                }
+            }
+            // try invoke NetworkController.get_BBBGCFDHBCBBFGC (RVA) if still no HP
+            if (s.hp < 0.f && ok_ptr(net) && unity_base()) {
+                @try {
+                    using F = int (*)(void*);
+                    int hv = R<F>(0x1621F20)(net);
+                    takeHP(hv);
+                } @catch (...) {}
             }
             void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
             if (ok_ptr(wry)) {
@@ -271,22 +320,51 @@ static void refresh(void* camTr) {
                 if (ok_ptr(wc)) {
                     void* ns = *(void**)((char*)wc + 0x58);
                     if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                    auto rd = [](void* base, size_t off) -> int {
+                    // path A: BHEHACCGBBGGBCH* @ 0xE0 / 0xE8 → value @ +0x14
+                    auto rdObj = [](void* base, size_t off) -> int {
                         void* o = *(void**)((char*)base + off);
                         if (!ok_ptr(o)) return -1;
                         short s14 = *(short*)((char*)o + 0x14);
                         if (s14 >= 0 && s14 <= 150) return (int)s14;
                         int i14 = *(int*)((char*)o + 0x14);
                         if (i14 >= 0 && i14 <= 150) return i14;
+                        // property backing sometimes @ +0x10
+                        short s10 = *(short*)((char*)o + 0x10);
+                        if (s10 >= 0 && s10 <= 150) return (int)s10;
                         return -1;
                     };
-                    int a = rd(wc, 0xE0);
-                    int b = rd(wc, 0xE8);
-                    if (a >= 0 && b >= 0 && a <= 150 && b <= 150) {
-                        if (b >= a) { s.ammo = a; s.ammoMax = b; }
-                        else { s.ammo = a; s.ammoMax = a; }
-                    } else if (a >= 0 && a <= 60) {
+                    int a = rdObj(wc, 0xE0);
+                    int b = rdObj(wc, 0xE8);
+                    // path B: plain ints on GunController 0xD8 / 0xDC
+                    if (a < 0) {
+                        int i0 = *(int*)((char*)wc + 0xD8);
+                        int i1 = *(int*)((char*)wc + 0xDC);
+                        if (i0 >= 0 && i0 <= 150) a = i0;
+                        if (i1 >= 0 && i1 <= 150) b = i1;
+                    }
+                    // path C: short getter RVA get_BFEDHEDEGAHDFBF
+                    if (a < 0 && unity_base()) {
+                        @try {
+                            using FS = short (*)(void*);
+                            short sv = R<FS>(0x17FA840)(wc);
+                            if (sv >= 0 && sv <= 150) a = (int)sv;
+                        } @catch (...) {}
+                    }
+                    // path D: GunParameters capacity nearby
+                    void* gp = *(void**)((char*)wc + 0x118);
+                    if (ok_ptr(gp) && b < 0) {
+                        for (size_t o : {0x78ul, 0x7Cul, 0x80ul, 0x88ul, 0x90ul}) {
+                            int m = *(int*)((char*)gp + o);
+                            if (m >= 5 && m <= 100) { b = m; break; }
+                            short ms = *(short*)((char*)gp + o);
+                            if (ms >= 5 && ms <= 100) { b = (int)ms; break; }
+                        }
+                    }
+                    if (a >= 0) {
                         s.ammo = a;
+                        if (b >= a && b <= 150) s.ammoMax = b;
+                        else if (b >= 0 && b <= 150) s.ammoMax = b;
+                        else s.ammoMax = a;
                     }
                 }
             }
@@ -309,7 +387,8 @@ static void refresh(void* camTr) {
     // Bomb/grenade every player-refresh (no extra throttle). Timers read softly.
     std::vector<WorldSnap> wtmp;
     bool wantWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty();
-    bool doWorld = wantWorld;
+    static int world_ctr = 0;
+    bool doWorld = wantWorld && ((++world_ctr % 3) == 0); // every 3rd refresh, still fast
     if (doWorld && (IL2CPP().ready || IL2CPP().init())) {
         auto& api = IL2CPP();
         auto collectSafe = [&](const char* ns, const char* cls, bool isBomb) {
@@ -517,6 +596,12 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat wid  = hgt * 0.45f;
         CGFloat left = mid - wid * 0.5f;
         CGFloat corner = fmaxf(6.f, hgt * 0.22f);
+        // fonts scale with box height (far = small, near = readable)
+        CGFloat nameFs = fminf(12.f, fmaxf(7.f, hgt * 0.10f));
+        CGFloat wpnFs  = fminf(10.f, fmaxf(6.5f, hgt * 0.085f));
+        CGFloat hpFs   = fminf(9.f,  fmaxf(6.f, hgt * 0.075f));
+        CGFloat padX   = fmaxf(4.f, nameFs * 0.55f);
+        CGFloat padY   = fmaxf(2.f, nameFs * 0.35f);
 
         // Mockup-style ESP: green box, cyan skeleton, name badge, HP%, armor%, dist, weapon
         UIColor* boxCol = [UIColor colorWithRed:0.2 green:0.95 blue:0.35 alpha:1];
@@ -584,7 +669,7 @@ UIView* g_esp_view(void) { return g_esp; }
             CGContextFillRect(ctx, CGRectMake(bx, top + (barH - fill), barW, fill));
             NSString* hpTxt = [NSString stringWithFormat:@"%.0f%%", hp01 * 100.f];
             [hpTxt drawAtPoint:CGPointMake(bx - 2, bot + 1)
-              withAttributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:9],
+              withAttributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:hpFs],
                                 NSForegroundColorAttributeName: hc }];
             // Armor bar (blue) further left
             if (p.armor >= 0.f) {
@@ -598,7 +683,7 @@ UIView* g_esp_view(void) { return g_esp; }
                 CGContextFillRect(ctx, CGRectMake(abx, top + (barH - af), barW, af));
                 NSString* arTxt = [NSString stringWithFormat:@"%.0f%%", ar01 * 100.f];
                 [arTxt drawAtPoint:CGPointMake(abx - 4, top - 12)
-                  withAttributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:8],
+                  withAttributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:hpFs],
                                     NSForegroundColorAttributeName: ac }];
             }
         }
@@ -614,13 +699,27 @@ UIView* g_esp_view(void) { return g_esp; }
             }
             if (lab.length) {
                 NSDictionary* attrs = @{
-                    NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
+                    NSFontAttributeName: [UIFont boldSystemFontOfSize:nameFs],
                     NSForegroundColorAttributeName: UIColor.whiteColor
                 };
                 CGSize ts = [lab sizeWithAttributes:attrs];
-                CGFloat bx = mid - ts.width * 0.5f - 8.f;
-                CGFloat by = top - ts.height - 14.f;
-                CGRect badge = CGRectMake(bx, by, ts.width + 16.f, ts.height + 6.f);
+                // clamp badge width to ~box width so long names don't dominate
+                CGFloat maxBadge = fmaxf(wid + 8.f, 40.f);
+                if (ts.width > maxBadge) {
+                    // shrink font until fits
+                    CGFloat fs = nameFs;
+                    while (fs > 6.f && ts.width > maxBadge) {
+                        fs -= 0.5f;
+                        attrs = @{
+                            NSFontAttributeName: [UIFont boldSystemFontOfSize:fs],
+                            NSForegroundColorAttributeName: UIColor.whiteColor
+                        };
+                        ts = [lab sizeWithAttributes:attrs];
+                    }
+                }
+                CGFloat bx = mid - ts.width * 0.5f - padX;
+                CGFloat by = top - ts.height - padY - 8.f;
+                CGRect badge = CGRectMake(bx, by, ts.width + padX * 2.f, ts.height + padY * 2.f);
                 UIColor* badgeBg = [UIColor colorWithRed:0.35 green:0.05 blue:0.55 alpha:0.92];
                 CGContextSetFillColorWithColor(ctx, badgeBg.CGColor);
                 UIBezierPath* path = [UIBezierPath bezierPathWithRoundedRect:badge cornerRadius:8];
@@ -628,7 +727,7 @@ UIView* g_esp_view(void) { return g_esp; }
                 CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.7 green:0.2 blue:1 alpha:1].CGColor);
                 CGContextSetLineWidth(ctx, 1.2);
                 [path stroke];
-                [lab drawAtPoint:CGPointMake(bx + 8.f, by + 3.f) withAttributes:attrs];
+                [lab drawAtPoint:CGPointMake(bx + padX, by + padY) withAttributes:attrs];
                 // small triangle under badge
                 CGContextSetFillColorWithColor(ctx, badgeBg.CGColor);
                 CGContextMoveToPoint(ctx, mid - 5, by + badge.size.height);
@@ -651,17 +750,30 @@ UIView* g_esp_view(void) { return g_esp; }
             else
                 wpn = [NSString stringWithFormat:@"%d/%d", p.ammo, p.ammoMax];
             NSDictionary* wa = @{
-                NSFontAttributeName: [UIFont boldSystemFontOfSize:10],
+                NSFontAttributeName: [UIFont boldSystemFontOfSize:wpnFs],
                 NSForegroundColorAttributeName: [UIColor colorWithRed:1 green:0.25 blue:0.25 alpha:1]
             };
             CGSize ws = [wpn sizeWithAttributes:wa];
-            CGFloat wx = mid - ws.width * 0.5f - 6.f;
-            CGFloat wy = bot + 4.f;
-            CGRect wr = CGRectMake(wx, wy, ws.width + 12.f, ws.height + 4.f);
+            CGFloat maxW = fmaxf(wid + 6.f, 36.f);
+            if (ws.width > maxW) {
+                CGFloat fs = wpnFs;
+                while (fs > 6.f && ws.width > maxW) {
+                    fs -= 0.5f;
+                    wa = @{
+                        NSFontAttributeName: [UIFont boldSystemFontOfSize:fs],
+                        NSForegroundColorAttributeName: [UIColor colorWithRed:1 green:0.25 blue:0.25 alpha:1]
+                    };
+                    ws = [wpn sizeWithAttributes:wa];
+                }
+            }
+            CGFloat wpad = fmaxf(3.f, wpnFs * 0.45f);
+            CGFloat wx = mid - ws.width * 0.5f - wpad;
+            CGFloat wy = bot + 3.f;
+            CGRect wr = CGRectMake(wx, wy, ws.width + wpad * 2.f, ws.height + wpad);
             CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:1 green:0.2 blue:0.2 alpha:1].CGColor);
             CGContextSetLineWidth(ctx, 1.2);
             CGContextStrokeRect(ctx, wr);
-            [wpn drawAtPoint:CGPointMake(wx + 6.f, wy + 2.f) withAttributes:wa];
+            [wpn drawAtPoint:CGPointMake(wx + wpad, wy + wpad * 0.5f) withAttributes:wa];
         }
     }
 
@@ -842,9 +954,16 @@ static void run_aim(void* cam, void* camTr) {
             default: boneY = 1.55f; break;
         }
 
-        Vec3 best{};
-        bool have = false;
-        float bestScore = 1e9f;
+        // Aimbot = visible only; Silent = any in FOV, instant angles. No LookAt (ESP drift + crash).
+        Vec3 bestSilent{};
+        Vec3 bestAim{};
+        bool haveSilent = false;
+        bool haveAim = false;
+        float scoreSilent = 1e9f;
+        float scoreAim = 1e9f;
+
+        Vec3 eye = cpos;
+        eye.y += 1.45f;
 
         for (auto& p : snap) {
             if (p.local) continue;
@@ -856,11 +975,6 @@ static void run_aim(void* cam, void* camTr) {
                 if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
             }
             Vec3 bone = {base.x, base.y + boneY, base.z};
-            float distTo = vdist(cpos, bone);
-
-            // Physics.Raycast disabled — was crashing; visible uses simple depth for now
-            (void)distTo;
-            (void)g_aimVisible;
 
             Vec3 sc = w2s(cam, bone);
             if (sc.z < 0.05f) continue;
@@ -868,32 +982,35 @@ static void run_aim(void* cam, void* camTr) {
             float sy = (scr.height - sc.y) - 3.f;
             float d2 = sqrtf((sx-cx)*(sx-cx) + (sy-cy)*(sy-cy));
             if (!fovUnlimited && d2 > fovR) continue;
-            if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
+
+            bool vis = is_visible(eye, bone);
+            // Silent: prefer visible (precise hit); fallback any in FOV
+            if (wantSilent) {
+                if (vis) {
+                    // visible targets beat wall targets: score with large bias
+                    float sc = d2 - 5000.f;
+                    if (sc < scoreSilent) {
+                        scoreSilent = sc; bestSilent = bone; haveSilent = true;
+                    }
+                } else if (!haveSilent || scoreSilent > 0.f) {
+                    // only take wall target if no visible yet
+                    if (d2 < scoreSilent) {
+                        scoreSilent = d2; bestSilent = bone; haveSilent = true;
+                    }
+                }
+            }
+            // Aimbot: visible only
+            if (wantAim && vis) {
+                if (d2 < scoreAim) {
+                    scoreAim = d2; bestAim = bone; haveAim = true;
+                }
+            }
         }
-        if (!have) { g_haveSilent = false; return; }
 
-        g_silentTarget = best;
-        g_haveSilent = true;
+        if (!haveSilent && !haveAim) { g_haveSilent = false; return; }
 
-        // Silent = hard angles (bullet path); Aimbot = smooth crosshair only
-        float sm = fmaxf(1.f, g_smooth.load());
-        if (wantSilent && !wantAim) sm = 1.f; // pure silent snaps angles
-
-        static Vec3 smT{};
-        static bool ini = false;
-        if (!ini) { smT = best; ini = true; }
-        if (wantSilent) {
-            smT = best; // silent tracks true bone instantly
-        } else {
-            smT.x += (best.x - smT.x) / sm;
-            smT.y += (best.y - smT.y) / sm;
-            smT.z += (best.z - smT.z) / sm;
-        }
-
-        Vec3 dir = vnorm(vsub(smT, cpos));
-        float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
-        float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
-        pitch = fmaxf(-85.f, fminf(85.f, pitch));
+        g_haveSilent = haveSilent;
+        if (haveSilent) g_silentTarget = bestSilent;
 
         float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
         float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
@@ -901,45 +1018,31 @@ static void run_aim(void* cam, void* camTr) {
         if (curP != curP || curY != curY) return;
         if (fabsf(curP) > 400.f || fabsf(curY) > 800.f) return;
 
-        float dy = yaw - curY;
-        while (dy >  180.f) dy -= 360.f;
-        while (dy < -180.f) dy += 360.f;
+        auto apply_angles = [&](Vec3 target, float smooth) {
+            Vec3 dir = vnorm(vsub(target, cpos));
+            float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
+            float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
+            pitch = fmaxf(-85.f, fminf(85.f, pitch));
+            float dy = yaw - curY;
+            while (dy >  180.f) dy -= 360.f;
+            while (dy < -180.f) dy += 360.f;
+            if (smooth <= 1.01f) {
+                *aPitch = pitch;
+                *aYaw   = curY + dy;
+            } else {
+                *aPitch = curP + (pitch - curP) / smooth;
+                *aYaw   = curY + dy / smooth;
+            }
+        };
 
-        if (wantSilent) {
-            *aPitch = pitch;
-            *aYaw   = curY + dy;
-            if (ok_ptr(aimTr) && unity_base()) {
-                @try {
-                    Vec3 up{0, 1, 0};
-                    using Look = void (*)(void*, Vec3*, Vec3*);
-                    R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &best, &up);
-                } @catch (...) {}
-            }
+        // Silent: hard angles (hits now). Aimbot alone: smooth + visible only.
+        // Never LookAt camTransform — that dragged ESP with the crosshair.
+        if (wantSilent && haveSilent) {
+            apply_angles(bestSilent, 1.f);
+        } else if (wantAim && haveAim) {
+            apply_angles(bestAim, fmaxf(1.f, g_smooth.load()));
         }
-        if (wantAim && !wantSilent) {
-            *aPitch = curP + (pitch - curP) / sm;
-            *aYaw   = curY + dy / sm;
-            if (ok_ptr(aimTr) && unity_base()) {
-                @try {
-                    Vec3 up{0, 1, 0};
-                    using Look = void (*)(void*, Vec3*, Vec3*);
-                    // soft target for aimbot
-                    R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
-                } @catch (...) {}
-            }
-        }
-        // both on: silent handles hit, aimbot still smooths crosshair toward smT
-        if (wantAim && wantSilent) {
-            *aPitch = pitch;
-            *aYaw = curY + dy;
-            if (ok_ptr(aimTr) && unity_base()) {
-                @try {
-                    Vec3 up{0, 1, 0};
-                    using Look = void (*)(void*, Vec3*, Vec3*);
-                    R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &best, &up);
-                } @catch (...) {}
-            }
-        }
+
     } @catch (...) {
         g_haveSilent = false;
     }
