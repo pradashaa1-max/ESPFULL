@@ -24,6 +24,7 @@ constexpr uint64_t Component_get_transform         = 0x3319A54;
 constexpr size_t PC_team           = 0x59;
 constexpr size_t PC_aimController  = 0x60;
 constexpr size_t PC_weaponry       = 0x68;
+constexpr size_t PC_networkController = 0x98;
 constexpr size_t PC_hitController  = 0x88;
 constexpr size_t PC_transform      = 0xD8;  // CBCBGACGGECGEAA
 constexpr size_t PC_photonView     = 0x120;
