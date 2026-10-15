@@ -440,10 +440,10 @@ static void rebuildContent() {
     };
 
     if (g_section == 0) { // Aim
-        add(makeSwitch(L("Aim bot","Аимбот"),
+        add(makeSwitch(L("Aimbot (aim only)","Аимбот (только наводка)"),
                        L("Automatically aims at enemies","Автоматически наводится на врагов"),
                        g_aimbot.load(), ^(bool v){ g_aimbot=v; Astral_SaveConfig(); }));
-        add(makeSwitch(L("Silent","Сайлент"),
+        add(makeSwitch(L("Silent (hits)","Сайлент (попадание)"),
                        L("Hides your aim from other players","Скрывает наводку от других"),
                        g_silent.load(), ^(bool v){ g_silent=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Visible check","Видимость"),

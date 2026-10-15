@@ -258,30 +258,29 @@ static void refresh(void* camTr) {
         s.weapon[0] = 0;
         // optional extras — never crash match enter
         @try {
-            // HP/Armor from NetworkController @ PC+0x98 → ints 0x90 / 0x94
+            // HP/Armor: NetworkController @ PC+0x98 → ints 0x90=HP 0x94=Armor (0..100 absolute)
             s.hp = -1.f;
-            if (g_espHP.load()) {
+            s.armor = -1.f;
+            {
                 void* net = *(void**)((char*)pc + Offsets::PC_networkController);
                 if (!ok_ptr(net))
                     net = *(void**)((char*)pc + 0x98);
                 if (ok_ptr(net)) {
                     int hv = *(int*)((char*)net + 0x90);
                     int ar = *(int*)((char*)net + 0x94);
-                    if (hv >= 0 && hv <= 100) s.hp = hv / 100.f;
+                    if (hv >= 0 && hv <= 100) s.hp = (float)hv;   // absolute remaining
                     if (ar >= 0 && ar <= 100) s.armor = (float)ar;
-                    // fallback other int slots
                     if (s.hp < 0.f) {
                         for (size_t o : {0x90ul, 0x94ul, 0x98ul, 0xB8ul}) {
                             int v = *(int*)((char*)net + o);
-                            if (v > 0 && v <= 100) { s.hp = v / 100.f; break; }
+                            if (v > 0 && v <= 100) { s.hp = (float)v; break; }
                         }
                     }
                 }
-                // PC ints 0x128/0x12C
                 if (s.hp < 0.f) {
                     int hv = *(int*)((char*)pc + 0x128);
                     int ar = *(int*)((char*)pc + 0x12C);
-                    if (hv >= 0 && hv <= 100) s.hp = hv / 100.f;
+                    if (hv >= 0 && hv <= 100) s.hp = (float)hv;
                     if (ar >= 0 && ar <= 100) s.armor = (float)ar;
                 }
             }
@@ -292,8 +291,21 @@ static void refresh(void* camTr) {
                     if (ok_ptr(wc)) {
                         void* ns = *(void**)((char*)wc + 0x58);
                         if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                        // ammo disabled — offsets gave random values
-
+                        // GunController: int ammo @ 0xD8, reserve-ish @ 0xDC; mag capacity from GunParameters Ammunition
+                        int a0 = *(int*)((char*)wc + 0xD8);
+                        int a1 = *(int*)((char*)wc + 0xDC);
+                        if (a0 >= 0 && a0 <= 200) s.ammo = a0;
+                        if (a1 >= 0 && a1 <= 200 && a1 >= s.ammo) s.ammoMax = a1;
+                        void* gp = *(void**)((char*)wc + 0x118); // GunParameters*
+                        if (!ok_ptr(gp)) gp = *(void**)((char*)wc + Offsets::WC_weaponParams);
+                        if (ok_ptr(gp)) {
+                            // Ammunition often embedded or nearby on GunParameters — try short pairs
+                            for (size_t o : {0x78ul, 0x7Aul, 0x80ul, 0x88ul, 0x90ul, 0xA0ul}) {
+                                short m = *(short*)((char*)gp + o);
+                                if (m > 0 && m <= 100) { s.ammoMax = (int)m; break; }
+                            }
+                            if (s.ammoMax < 0 && s.ammo >= 0) s.ammoMax = s.ammo;
+                        }
                     }
                 }
             }
@@ -313,12 +325,9 @@ static void refresh(void* camTr) {
     if (mines == 0 && !tmp.empty() && bestD < 5.f)
         tmp[bestIdx].local = true;
 
-    // Safe bomb/grenade: ONLY get_tr + get_pos. No field reads (0xA8/0x18 crashed on enter).
+    // Bomb/grenade ESP — every refresh when players present (no artificial delay)
     std::vector<WorldSnap> wtmp;
-    static int world_ctr = 0;
-    // only every 15 refreshes, and only if we already have players (match started)
-    bool doWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty() && (++world_ctr >= 25);
-    if (doWorld) world_ctr = 0;
+    bool doWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty();
     if (doWorld && (IL2CPP().ready || IL2CPP().init())) {
         auto& api = IL2CPP();
         auto collectSafe = [&](const char* ns, const char* cls, bool isBomb) {
@@ -375,21 +384,45 @@ static void refresh(void* camTr) {
                                 }
                             } @catch (...) {}
                         } else {
-                            snprintf(w.label, sizeof(w.label), "GRENADE");
+                            snprintf(w.label, sizeof(w.label), "NADE");
                             @try {
-                                // GrenadeParameters often @ 0x18 on DroppedGrenadeController
-                                void* gp = *(void**)((char*)o + 0x18);
+                                void* gp = *(void**)((char*)o + 0x18); // GrenadeParameters*
+                                char tmpn[24]{};
                                 if (ok_ptr(gp)) {
-                                    // try common name string offsets on parameters SO
-                                    for (size_t no : {0x10ul, 0x18ul, 0x20ul}) {
-                                        void* ns2 = *(void**)((char*)gp + no);
-                                        char tmpn[20]{};
-                                        if (ok_ptr(ns2)) read_str(ns2, tmpn, sizeof(tmpn));
-                                        if (tmpn[0] && strlen(tmpn) < 18) {
-                                            snprintf(w.label, sizeof(w.label), "%s", tmpn);
-                                            break;
+                                    // InventoryParameters._displayName @ 0x20
+                                    void* ns2 = *(void**)((char*)gp + 0x20);
+                                    if (ok_ptr(ns2)) read_str(ns2, tmpn, sizeof(tmpn));
+                                    if (!tmpn[0]) {
+                                        for (size_t no : {0x10ul, 0x18ul}) {
+                                            ns2 = *(void**)((char*)gp + no);
+                                            if (ok_ptr(ns2)) read_str(ns2, tmpn, sizeof(tmpn));
+                                            if (tmpn[0]) break;
                                         }
                                     }
+                                }
+                                // fuse / remaining: 0x50 elapsed-ish, 0x64 remaining candidate
+                                float t50 = *(float*)((char*)o + 0x50);
+                                float t64 = *(float*)((char*)o + 0x64);
+                                float fuse = -1.f;
+                                if (t64 == t64 && t64 > 0.05f && t64 <= 15.f) fuse = t64;
+                                else if (t50 == t50 && t50 > 0.05f && t50 <= 15.f) fuse = t50;
+                                // detonationDuration on params @ 0xA8
+                                if (fuse < 0.f && ok_ptr(gp)) {
+                                    float det = *(float*)((char*)gp + 0xA8);
+                                    if (det == det && det > 0.2f && det <= 15.f && t50 == t50 && t50 >= 0.f)
+                                        fuse = fmaxf(0.f, det - t50);
+                                }
+                                const char* base = tmpn[0] ? tmpn : "NADE";
+                                // short friendly tags
+                                if (strstr(base, "Smoke") || strstr(base, "smoke")) base = "SMOKE";
+                                else if (strstr(base, "Molly") || strstr(base, "Incend") || strstr(base, "molly") || strstr(base, "Fire")) base = "MOLLY";
+                                else if (strstr(base, "Flash") || strstr(base, "flash")) base = "FLASH";
+                                else if (strstr(base, "HE") || strstr(base, "Frag") || strstr(base, "he")) base = "HE";
+                                if (fuse >= 0.f) {
+                                    w.timer = fuse;
+                                    snprintf(w.label, sizeof(w.label), "%s %.1fs", base, fuse);
+                                } else {
+                                    snprintf(w.label, sizeof(w.label), "%s", base);
                                 }
                             } @catch (...) {}
                         }
@@ -456,7 +489,7 @@ UIView* g_esp_view(void) { return g_esp; }
     CGFloat H = self.bounds.size.height;
     if (W < 2 || H < 2) return;
 
-    if (g_fovDraw.load() && g_aimbot.load()) {
+    if (g_fovDraw.load() && (g_aimbot.load() || g_silent.load())) {
         CGFloat cx = W * 0.5f, cy = H * 0.5f;
         CGFloat side = W < H ? W : H;
         CGFloat r = side * (0.04f + g_fov.load() / 30.f * 0.20f);
@@ -535,15 +568,39 @@ UIView* g_esp_view(void) { return g_esp; }
             CGFloat barH = hgt;
             CGFloat barW = 3.f;
             CGFloat bx = left - 6.f;
-            CGFloat hp = p.hp;
+            CGFloat hp01 = fminf(1.f, fmaxf(0.f, p.hp / 100.f)); // p.hp is absolute 0..100
             CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.45].CGColor);
             CGContextFillRect(ctx, CGRectMake(bx, top, barW, barH));
-            UIColor* hc = hp > 0.5f ? [UIColor colorWithRed:0.2 green:0.9 blue:0.3 alpha:1]
-                         : hp > 0.25f ? [UIColor colorWithRed:0.95 green:0.75 blue:0.1 alpha:1]
+            UIColor* hc = hp01 > 0.5f ? [UIColor colorWithRed:0.2 green:0.9 blue:0.3 alpha:1]
+                         : hp01 > 0.25f ? [UIColor colorWithRed:0.95 green:0.75 blue:0.1 alpha:1]
                          : [UIColor colorWithRed:0.95 green:0.2 blue:0.15 alpha:1];
             CGContextSetFillColorWithColor(ctx, hc.CGColor);
-            CGFloat fill = barH * hp;
+            CGFloat fill = barH * hp01;
             CGContextFillRect(ctx, CGRectMake(bx, top + (barH - fill), barW, fill));
+            // remaining HP number
+            NSString* hpTxt = [NSString stringWithFormat:@"%.0f", p.hp];
+            [hpTxt drawAtPoint:CGPointMake(bx - 18, top + barH * 0.5f - 6)
+              withAttributes:@{
+                  NSFontAttributeName: [UIFont boldSystemFontOfSize:10],
+                  NSForegroundColorAttributeName: hc
+              }];
+            // blue armor bar + value /100
+            if (p.armor >= 0.f) {
+                CGFloat abx = left - 11.f;
+                CGFloat ar01 = fminf(1.f, fmaxf(0.f, p.armor / 100.f));
+                CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.45].CGColor);
+                CGContextFillRect(ctx, CGRectMake(abx, top, barW, barH));
+                UIColor* ac = [UIColor colorWithRed:0.25 green:0.55 blue:1.0 alpha:1];
+                CGContextSetFillColorWithColor(ctx, ac.CGColor);
+                CGFloat af = barH * ar01;
+                CGContextFillRect(ctx, CGRectMake(abx, top + (barH - af), barW, af));
+                NSString* arTxt = [NSString stringWithFormat:@"%.0f", p.armor];
+                [arTxt drawAtPoint:CGPointMake(left + wid + 3, top)
+                  withAttributes:@{
+                      NSFontAttributeName: [UIFont systemFontOfSize:9],
+                      NSForegroundColorAttributeName: ac
+                  }];
+            }
         }
         if (nameOn || distOn || g_espWeapon.load()) {
             NSMutableString* lab = [NSMutableString stringWithUTF8String:p.name];
@@ -574,14 +631,7 @@ UIView* g_esp_view(void) { return g_esp; }
                       NSForegroundColorAttributeName: [UIColor colorWithRed:0.85 green:0.85 blue:0.4 alpha:1]
                   }];
             }
-            if (p.armor >= 0) {
-                NSString* ar = [NSString stringWithFormat:@"A:%.0f", p.armor];
-                [ar drawAtPoint:CGPointMake(left + wid + 4, top)
-                  withAttributes:@{
-                      NSFontAttributeName: [UIFont systemFontOfSize:9],
-                      NSForegroundColorAttributeName: [UIColor colorWithRed:0.4 green:0.7 blue:1 alpha:1]
-                  }];
-            }
+
         }
     }
 
@@ -712,7 +762,10 @@ static void run_aim(void* cam, void* camTr) {
 
         apply_recoil(localPc);
 
-        if (!g_aimbot.load()) { g_haveSilent = false; return; }
+        // Aimbot and Silent are independent. FOV value always filters; g_fovDraw only draws the circle.
+        bool wantAim = g_aimbot.load();
+        bool wantSilent = g_silent.load();
+        if (!wantAim && !wantSilent) { g_haveSilent = false; return; }
         if (!ok_ptr(cam) || !ok_ptr(camTr) || !ok_ptr(localPc)) return;
 
         void* aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
@@ -770,15 +823,20 @@ static void run_aim(void* cam, void* camTr) {
         g_silentTarget = best;
         g_haveSilent = true;
 
+        // Silent = hard angles (bullet path); Aimbot = smooth crosshair only
         float sm = fmaxf(1.f, g_smooth.load());
-        if (g_silent.load()) sm = 1.f;
+        if (wantSilent && !wantAim) sm = 1.f; // pure silent snaps angles
 
         static Vec3 smT{};
         static bool ini = false;
         if (!ini) { smT = best; ini = true; }
-        smT.x += (best.x - smT.x) / sm;
-        smT.y += (best.y - smT.y) / sm;
-        smT.z += (best.z - smT.z) / sm;
+        if (wantSilent) {
+            smT = best; // silent tracks true bone instantly
+        } else {
+            smT.x += (best.x - smT.x) / sm;
+            smT.y += (best.y - smT.y) / sm;
+            smT.z += (best.z - smT.z) / sm;
+        }
 
         Vec3 dir = vnorm(vsub(smT, cpos));
         float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
@@ -795,19 +853,19 @@ static void run_aim(void* cam, void* camTr) {
         while (dy >  180.f) dy -= 360.f;
         while (dy < -180.f) dy += 360.f;
 
-        if (g_silent.load()) {
+        if (wantSilent) {
+            // Silent: write exact aim angles so shots land; optional LookAt for reliability
             *aPitch = pitch;
             *aYaw   = curY + dy;
-            // Silent: force cam transform look (angles alone often ignored by game)
             if (ok_ptr(aimTr) && unity_base()) {
                 Vec3 up{0, 1, 0};
                 using Look = void (*)(void*, Vec3*, Vec3*);
                 R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
             }
-        } else {
+        } else if (wantAim) {
+            // Aimbot only: smooth crosshair toward target (visible snap)
             *aPitch = curP + (pitch - curP) / sm;
             *aYaw   = curY + dy / sm;
-            // soft aim also nudges transform lightly for reliability
             if (ok_ptr(aimTr) && unity_base() && sm <= 3.f) {
                 Vec3 up{0, 1, 0};
                 using Look = void (*)(void*, Vec3*, Vec3*);
@@ -833,7 +891,7 @@ void Astral_FeaturesTick() {
         }
 
         bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load() || g_espHP.load() || g_espWeapon.load() || g_espBomb.load() || g_espGrenade.load();
-        bool wantAim = g_aimbot.load();
+        bool wantAim = g_aimbot.load() || g_silent.load();
         bool wantRec = g_noRecoil.load();
         bool wantFov = g_fovDraw.load();
         if (!wantEsp && !wantAim && !wantRec && !wantFov) return;
