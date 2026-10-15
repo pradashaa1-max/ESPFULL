@@ -258,8 +258,33 @@ static void refresh(void* camTr) {
         s.weapon[0] = 0;
         // optional extras — never crash match enter
         @try {
-            // HP read disabled — was random/bugged
+            // HP/Armor from NetworkController @ PC+0x98 → ints 0x90 / 0x94
             s.hp = -1.f;
+            if (g_espHP.load()) {
+                void* net = *(void**)((char*)pc + Offsets::PC_networkController);
+                if (!ok_ptr(net))
+                    net = *(void**)((char*)pc + 0x98);
+                if (ok_ptr(net)) {
+                    int hv = *(int*)((char*)net + 0x90);
+                    int ar = *(int*)((char*)net + 0x94);
+                    if (hv >= 0 && hv <= 100) s.hp = hv / 100.f;
+                    if (ar >= 0 && ar <= 100) s.armor = (float)ar;
+                    // fallback other int slots
+                    if (s.hp < 0.f) {
+                        for (size_t o : {0x90ul, 0x94ul, 0x98ul, 0xB8ul}) {
+                            int v = *(int*)((char*)net + o);
+                            if (v > 0 && v <= 100) { s.hp = v / 100.f; break; }
+                        }
+                    }
+                }
+                // PC ints 0x128/0x12C
+                if (s.hp < 0.f) {
+                    int hv = *(int*)((char*)pc + 0x128);
+                    int ar = *(int*)((char*)pc + 0x12C);
+                    if (hv >= 0 && hv <= 100) s.hp = hv / 100.f;
+                    if (ar >= 0 && ar <= 100) s.armor = (float)ar;
+                }
+            }
             if (g_espWeapon.load()) {
                 void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
                 if (ok_ptr(wry)) {
@@ -331,9 +356,22 @@ static void refresh(void* camTr) {
                             snprintf(w.label, sizeof(w.label), "BOMB");
                             @try {
                                 float rem = *(float*)((char*)o + 0xA8);
-                                if (rem == rem && rem >= 0.f && rem <= 60.f) {
+                                double plant = *(double*)((char*)o + 0xA0);
+                                // 0xA8 is remaining OR fuse length
+                                if (rem == rem && rem > 0.f && rem <= 60.f) {
                                     w.timer = rem;
                                     snprintf(w.label, sizeof(w.label), "BOMB %.0fs", rem);
+                                } else if (plant == plant && plant > 1000.0) {
+                                    // network time stamp — show planted marker only
+                                    snprintf(w.label, sizeof(w.label), "BOMB");
+                                }
+                                // also try 0x40 float
+                                if (w.timer < 0.f) {
+                                    float f40 = *(float*)((char*)o + 0x40);
+                                    if (f40 == f40 && f40 > 0.f && f40 <= 60.f) {
+                                        w.timer = f40;
+                                        snprintf(w.label, sizeof(w.label), "BOMB %.0fs", f40);
+                                    }
                                 }
                             } @catch (...) {}
                         } else {
@@ -493,11 +531,11 @@ UIView* g_esp_view(void) { return g_esp; }
             CGContextSetFillColorWithColor(ctx, col.CGColor);
             CGContextFillEllipseInRect(ctx, CGRectMake(hx - 3, hy - 3, 6, 6));
         }
-        if (hpOn) {
+        if (hpOn && p.hp >= 0.f) {
             CGFloat barH = hgt;
             CGFloat barW = 3.f;
             CGFloat bx = left - 6.f;
-            CGFloat hp = p.hp >= 0.f ? p.hp : 1.f;
+            CGFloat hp = p.hp;
             CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.45].CGColor);
             CGContextFillRect(ctx, CGRectMake(bx, top, barW, barH));
             UIColor* hc = hp > 0.5f ? [UIColor colorWithRed:0.2 green:0.9 blue:0.3 alpha:1]
@@ -758,19 +796,24 @@ static void run_aim(void* cam, void* camTr) {
         while (dy < -180.f) dy += 360.f;
 
         if (g_silent.load()) {
-            // hard lock — no smooth, full angle replace
             *aPitch = pitch;
             *aYaw   = curY + dy;
-            // also write possible duplicate angle slots used by some builds
-            float* p2 = (float*)((char*)aimCtrl + 0x16C);
-            float* y2 = (float*)((char*)aimCtrl + 0x170);
-            if (*p2 == *p2 && fabsf(*p2) < 400.f) *p2 = pitch;
-            if (*y2 == *y2 && fabsf(*y2) < 800.f) *y2 = *aYaw;
+            // Silent: force cam transform look (angles alone often ignored by game)
+            if (ok_ptr(aimTr) && unity_base()) {
+                Vec3 up{0, 1, 0};
+                using Look = void (*)(void*, Vec3*, Vec3*);
+                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
+            }
         } else {
             *aPitch = curP + (pitch - curP) / sm;
             *aYaw   = curY + dy / sm;
+            // soft aim also nudges transform lightly for reliability
+            if (ok_ptr(aimTr) && unity_base() && sm <= 3.f) {
+                Vec3 up{0, 1, 0};
+                using Look = void (*)(void*, Vec3*, Vec3*);
+                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
+            }
         }
-        // NEVER LookAt — keeps ESP stable
     } @catch (...) {
         g_haveSilent = false;
     }
