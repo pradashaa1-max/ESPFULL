@@ -272,111 +272,50 @@ static void refresh(void* camTr) {
         s.ammo = -1;
         s.ammoMax = -1;
         s.weapon[0] = 0;
-        // HP / Armor / Ammo — all safe paths we know from dump
+        // HP/Armor/Ammo — field reads only, no RVA invokes (wrong base = crash)
         @try {
-            auto ok100 = [](int v) { return v >= 0 && v <= 100; };
-            auto okAmmo = [](int v) { return v >= 0 && v <= 150; };
-
-            // --- HP / Armor ---
-            // A) PlayerController ints around 0x128 (property pair in dump)
-            {
-                int a = *(int*)((char*)pc + 0x128);
-                int b = *(int*)((char*)pc + 0x12C);
-                if (ok100(a)) s.hp = (float)a;
-                if (ok100(b)) s.armor = (float)b;
-            }
-            // B) property getters
-            if ((s.hp < 0.f || s.armor < 0.f) && unity_base()) {
-                @try {
-                    using FI = int (*)(void*);
-                    if (s.hp < 0.f) {
-                        int v = R<FI>(0x1623100)(pc);
-                        if (ok100(v)) s.hp = (float)v;
-                    }
-                    if (s.armor < 0.f) {
-                        int v = R<FI>(0x1623110)(pc);
-                        if (ok100(v)) s.armor = (float)v;
-                    }
-                } @catch (...) {}
-            }
-            // C) NetworkController 0x90 / 0x94
-            if (s.hp < 0.f || s.armor < 0.f) {
-                void* net = *(void**)((char*)pc + Offsets::PC_networkController);
-                if (ok_ptr(net)) {
-                    int a = *(int*)((char*)net + 0x90);
-                    int b = *(int*)((char*)net + 0x94);
-                    if (s.hp < 0.f && ok100(a)) s.hp = (float)a;
-                    if (s.armor < 0.f && ok100(b)) s.armor = (float)b;
+            int a = *(int*)((char*)pc + 0x128);
+            int b = *(int*)((char*)pc + 0x12C);
+            if (a >= 0 && a <= 100) s.hp = (float)a;
+            if (b >= 0 && b <= 100) s.armor = (float)b;
+            void* net = *(void**)((char*)pc + Offsets::PC_networkController);
+            if (ok_ptr(net)) {
+                if (s.hp < 0.f) {
+                    int n = *(int*)((char*)net + 0x90);
+                    if (n >= 0 && n <= 100) s.hp = (float)n;
+                }
+                if (s.armor < 0.f) {
+                    int n = *(int*)((char*)net + 0x94);
+                    if (n >= 0 && n <= 100) s.armor = (float)n;
                 }
             }
-            // D) if only one value found, treat as HP (armor optional)
-            // leave as-is
-
-            // --- Weapon name + Ammo ---
             void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
             if (ok_ptr(wry)) {
                 void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
                 if (ok_ptr(wc)) {
                     void* ns = *(void**)((char*)wc + 0x58);
                     if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-
-                    bool isGun = s.weapon[0] != 0;
-                    if (isGun) {
+                    bool gun = s.weapon[0] != 0;
+                    if (gun) {
                         const char* bad[] = {"HE","Flash","Smoke","Molly","Incend","Grenade","Bomb","Knife","knife","C4",nullptr};
                         for (int i = 0; bad[i]; i++)
-                            if (strstr(s.weapon, bad[i])) { isGun = false; break; }
+                            if (strstr(s.weapon, bad[i])) { gun = false; break; }
                     }
-                    // no name → still try gun layout carefully if GunParameters present
-                    void* gp = ok_ptr(wc) ? *(void**)((char*)wc + 0x118) : nullptr;
-                    if (!ok_ptr(gp)) gp = nullptr;
-                    if (isGun || ok_ptr(gp)) {
-                        // current ammo: BHEHACCGBBGGBCH* @ 0xE0, value int/short @ +0x14
-                        auto rdMag = [](void* base, size_t off) -> int {
-                            void* o = *(void**)((char*)base + off);
-                            if (!ok_ptr(o)) return -1;
-                            // BHEHACCGBBGGBCH: int at 0x14 holds ammo count
-                            int i14 = *(int*)((char*)o + 0x14);
-                            if (i14 >= 0 && i14 <= 150) return i14;
-                            short s14 = *(short*)((char*)o + 0x14);
-                            if (s14 >= 0 && s14 <= 150) return (int)s14;
-                            short s10 = *(short*)((char*)o + 0x10);
-                            if (s10 >= 0 && s10 <= 150) return (int)s10;
-                            return -1;
-                        };
-                        int cur = rdMag(wc, 0xE0);
-                        int res = rdMag(wc, 0xE8);
-                        // fallback plain ints on GunController
-                        if (cur < 0) {
-                            int i0 = *(int*)((char*)wc + 0xD8);
-                            if (okAmmo(i0)) cur = i0;
+                    if (gun) {
+                        void* mo = *(void**)((char*)wc + 0xE0);
+                        if (ok_ptr(mo)) {
+                            int cur = *(int*)((char*)mo + 0x14);
+                            if (cur >= 0 && cur <= 150) s.ammo = cur;
                         }
-                        if (res < 0) {
-                            int i1 = *(int*)((char*)wc + 0xDC);
-                            if (okAmmo(i1)) res = i1;
-                        }
-                        // max from GunParameters._ammunition @ 0x90 (Ammunition: short mag@0x10, capacity@0x12)
-                        int magCap = -1;
+                        void* gp = *(void**)((char*)wc + 0x118);
                         if (ok_ptr(gp)) {
-                            @try {
-                                void* am = *(void**)((char*)gp + 0x90);
-                                if (ok_ptr(am)) {
-                                    short mc = *(short*)((char*)am + 0x10);
-                                    short cap = *(short*)((char*)am + 0x12);
-                                    if (mc >= 1 && mc <= 150) magCap = (int)mc;
-                                    else if (cap >= 1 && cap <= 150) magCap = (int)cap;
-                                }
-                            } @catch (...) {}
+                            void* am = *(void**)((char*)gp + 0x90);
+                            if (ok_ptr(am)) {
+                                short mc = *(short*)((char*)am + 0x10);
+                                if (mc >= 1 && mc <= 150) s.ammoMax = (int)mc;
+                            }
                         }
-                        if (cur >= 0) {
-                            s.ammo = cur;
-                            if (magCap > 0) s.ammoMax = magCap;
-                            else if (res >= cur) s.ammoMax = res;
-                            else if (res >= 0) s.ammoMax = res;
-                            else s.ammoMax = cur;
-                        } else if (magCap > 0) {
-                            // show capacity only
-                            s.ammoMax = magCap;
-                        }
+                        if (s.ammo >= 0 && s.ammoMax < 0) s.ammoMax = s.ammo;
                     }
                 }
             }
@@ -396,16 +335,14 @@ static void refresh(void* camTr) {
     if (mines == 0 && !tmp.empty() && bestIdx < tmp.size() && bestD < 5.f)
         tmp[bestIdx].local = true;
 
-    // World ESP: every 2nd refresh (HE appears fast). Timers: bomb / smoke / molly only.
+    // World ESP — rare FOT, POSITION ONLY (no field reads = no crash on HE)
     std::vector<WorldSnap> wtmp;
     static int world_ctr = 0;
     bool wantWorld = (g_espBomb.load() || g_espGrenade.load()) && !tmp.empty();
-    bool doWorld = wantWorld && ((++world_ctr % 2) == 0);
+    bool doWorld = wantWorld && ((++world_ctr % 10) == 0);
     if (doWorld && (IL2CPP().ready || IL2CPP().init())) {
         auto& api = IL2CPP();
-        auto collectSafe = [&](const char* ns, const char* cls, bool isBomb) {
-            if (isBomb && !g_espBomb.load()) return;
-            if (!isBomb && !g_espGrenade.load()) return;
+        auto collectSafe = [&](const char* ns, const char* cls, const char* tag) {
             @try {
                 Il2CppClass* k = api.find_class(ns, cls);
                 if (!k) k = api.find_class("", cls);
@@ -426,92 +363,25 @@ static void refresh(void* camTr) {
                 push_array(a, arr, api);
                 int added = 0;
                 for (void* o : arr) {
-                    if (!ok_ptr(o) || added >= 10) break;
+                    if (!ok_ptr(o) || added >= 8) break;
                     @try {
                         void* tr = get_tr(o);
                         if (!ok_ptr(tr)) continue;
                         Vec3 pos = get_pos(tr);
-                        if (pos.x != pos.x || fabsf(pos.x) > 1e5f || fabsf(pos.y) > 1e5f) continue;
+                        if (pos.x != pos.x || fabsf(pos.x) > 1e5f) continue;
                         WorldSnap w{};
                         w.pos = pos;
                         w.timer = -1.f;
-                        if (isBomb) {
-                            snprintf(w.label, sizeof(w.label), "BOMB");
+                        snprintf(w.label, sizeof(w.label), "%s", tag);
+                        // bomb timer only — one float, soft
+                        if (tag[0]=='B') {
                             @try {
-                                float f40 = *(float*)((char*)o + 0x40);
-                                float fA8 = *(float*)((char*)o + 0xA8);
-                                float t = -1.f;
-                                if (f40 == f40 && f40 > 0.5f && f40 <= 45.f) t = f40;
-                                else if (fA8 == fA8 && fA8 > 0.5f && fA8 <= 45.f) t = fA8;
-                                if (t > 0.f) {
-                                    w.timer = t;
-                                    snprintf(w.label, sizeof(w.label), "BOMB %.0fs", t);
+                                float f = *(float*)((char*)o + 0x40);
+                                if (f == f && f > 1.f && f <= 40.f) {
+                                    w.timer = f;
+                                    snprintf(w.label, sizeof(w.label), "BOMB %.0fs", f);
                                 }
                             } @catch (...) {}
-                        } else {
-                            // Weapon id enum @ 0x88: HE=91 Smoke=92 Flash=93 Molly=94
-                            int wid = -1;
-                            @try { wid = *(int*)((char*)o + 0x88); } @catch (...) { wid = -1; }
-                            // also try parameters name
-                            char tmpn[24]{};
-                            float detDur = -1.f;
-                            @try {
-                                void* gp = *(void**)((char*)o + 0x18);
-                                if (ok_ptr(gp)) {
-                                    // _detonationDuration on GrenadeParameters @ 0xA8
-                                    float d = *(float*)((char*)gp + 0xA8);
-                                    if (d == d && d > 0.3f && d <= 25.f) detDur = d;
-                                    for (size_t no : {0x20ul, 0x18ul, 0x28ul, 0x30ul}) {
-                                        void* ns2 = *(void**)((char*)gp + no);
-                                        if (ok_ptr(ns2)) {
-                                            read_str(ns2, tmpn, sizeof(tmpn));
-                                            if (tmpn[0]) break;
-                                        }
-                                    }
-                                }
-                            } @catch (...) {}
-
-                            bool isSmoke = (wid == 92) || (tmpn[0] && (strstr(tmpn,"Smoke")||strstr(tmpn,"smoke")));
-                            bool isMolly = (wid == 94) || (tmpn[0] && (strstr(tmpn,"Molly")||strstr(tmpn,"Incend")||strstr(tmpn,"Fire")||strstr(tmpn,"molly")));
-                            bool isFlash = (wid == 93) || (tmpn[0] && (strstr(tmpn,"Flash")||strstr(tmpn,"flash")));
-                            bool isHE    = (wid == 91) || (!isSmoke && !isMolly && !isFlash);
-
-                            // fuse remaining: prefer 0x64, else detDur - elapsed(0x50)
-                            auto readFuse = [&](float maxT) -> float {
-                                float fuse = -1.f;
-                                @try {
-                                    float t64 = *(float*)((char*)o + 0x64);
-                                    float t50 = *(float*)((char*)o + 0x50);
-                                    if (t64 == t64 && t64 > 0.02f && t64 <= maxT) fuse = t64;
-                                    else if (detDur > 0.f && t50 == t50 && t50 >= 0.f && t50 < detDur)
-                                        fuse = detDur - t50;
-                                    else if (t50 == t50 && t50 > 0.02f && t50 <= maxT) fuse = t50;
-                                } @catch (...) {}
-                                return fuse;
-                            };
-
-                            if (isSmoke) {
-                                float fuse = readFuse(22.f);
-                                if (fuse > 0.f) {
-                                    w.timer = fuse;
-                                    snprintf(w.label, sizeof(w.label), "SMOKE %.1fs", fuse);
-                                } else {
-                                    snprintf(w.label, sizeof(w.label), "SMOKE");
-                                }
-                            } else if (isMolly) {
-                                float fuse = readFuse(12.f);
-                                if (fuse > 0.f) {
-                                    w.timer = fuse;
-                                    snprintf(w.label, sizeof(w.label), "MOLLY %.1fs", fuse);
-                                } else {
-                                    snprintf(w.label, sizeof(w.label), "MOLLY");
-                                }
-                            } else if (isFlash) {
-                                snprintf(w.label, sizeof(w.label), "FLASH");
-                            } else {
-                                // HE — position only, appear ASAP (no extra field reads)
-                                snprintf(w.label, sizeof(w.label), "HE");
-                            }
                         }
                         wtmp.push_back(w);
                         added++;
@@ -519,27 +389,18 @@ static void refresh(void* camTr) {
                 }
             } @catch (...) {}
         };
-        if (g_espBomb.load()) {
-            collectSafe("Axlebolt.Standoff.Inventory.Bomb", "PlantedBombController", true);
-            if (wtmp.empty())
-                collectSafe("", "PlantedBombController", true);
-        }
-        if (g_espGrenade.load()) {
-            collectSafe("Axlebolt.Standoff.Inventory.Grenade", "DroppedGrenadeController", false);
-            if (wtmp.size() < 10)
-                collectSafe("", "DroppedGrenadeController", false);
-        }
+        if (g_espBomb.load())
+            collectSafe("Axlebolt.Standoff.Inventory.Bomb", "PlantedBombController", "BOMB");
+        if (g_espGrenade.load())
+            collectSafe("Axlebolt.Standoff.Inventory.Grenade", "DroppedGrenadeController", "NADE");
     }
 
     std::lock_guard<std::mutex> lk(g_mtx);
     g_list.swap(tmp);
-    // clear if both off; update if we got objects; keep previous if empty collect (no blink/delay gap)
     if (!g_espBomb.load() && !g_espGrenade.load()) {
         g_world.clear();
-    } else if (doWorld) {
-        if (!wtmp.empty())
-            g_world.swap(wtmp);
-        // empty FOT result → keep last frame so HE doesn't vanish/lag
+    } else if (doWorld && !wtmp.empty()) {
+        g_world.swap(wtmp);
     }
   } @catch (...) {
     std::lock_guard<std::mutex> lk(g_mtx);
@@ -955,53 +816,67 @@ static void apply_recoil(void* localPc) {
 
 static void run_aim(void* cam, void* camTr) {
     @try {
-        std::vector<PSnap> snap;
-        void* localPc = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            snap = g_list;
-            for (auto& s : snap) if (s.local) localPc = s.obj;
-        }
-        // is_mine can fail mid-round — fallback: player with photon isMine retry / first in list near camera
-        if (!ok_ptr(localPc) && !snap.empty()) {
-            for (auto& s : snap) {
-                if (ok_ptr(s.obj) && is_mine(s.obj)) { localPc = s.obj; break; }
-            }
-        }
-        if (!ok_ptr(localPc) && ok_ptr(camTr) && !snap.empty()) {
-            Vec3 cp = get_pos(camTr);
-            float bd = 1e9f;
-            for (auto& s : snap) {
-                float d = vdist(s.pos, cp);
-                if (d < bd && d < 3.5f) { bd = d; localPc = s.obj; }
-            }
-        }
-
-        apply_recoil(localPc);
-
-        // Aimbot and Silent are independent. FOV value always filters; g_fovDraw only draws the circle.
         bool wantAim = g_aimbot.load();
         bool wantSilent = g_silent.load();
         if (!wantAim && !wantSilent) { g_haveSilent = false; return; }
-        if (!ok_ptr(cam) || !ok_ptr(camTr) || !ok_ptr(localPc)) return;
+        if (!ok_ptr(cam) || !ok_ptr(camTr)) return;
+
+        std::vector<PSnap> snap;
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            snap = g_list;
+        }
+        if (snap.empty()) { g_haveSilent = false; return; }
+
+        // find local: is_mine, else nearest to camera under 4m
+        void* localPc = nullptr;
+        int localTeam = -1;
+        Vec3 cpos = get_pos(camTr);
+        float nearD = 1e9f;
+        for (auto& s : snap) {
+            if (s.local || is_mine(s.obj)) {
+                localPc = s.obj;
+                localTeam = s.team;
+                break;
+            }
+        }
+        if (!ok_ptr(localPc)) {
+            for (auto& s : snap) {
+                float d = vdist(s.pos, cpos);
+                if (d < nearD && d < 4.f) { nearD = d; localPc = s.obj; localTeam = s.team; }
+            }
+        }
+        if (!ok_ptr(localPc)) { g_haveSilent = false; return; }
+
+        apply_recoil(localPc);
 
         void* aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
         if (!ok_ptr(aimCtrl)) return;
 
-        void* aimTr = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
-        if (!ok_ptr(aimTr)) aimTr = camTr;
+        float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
+        float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
+
+        // Silent must NOT leave the crosshair on the enemy.
+        // Restore user view from previous silent frame first.
+        static float s_userP = 0.f, s_userY = 0.f;
+        static bool  s_needRestore = false;
+        if (s_needRestore) {
+            *aPitch = s_userP;
+            *aYaw   = s_userY;
+            s_needRestore = false;
+        }
+
+        float curP = *aPitch, curY = *aYaw;
+        if (curP != curP || curY != curY) return;
+        if (fabsf(curP) > 89.f) curP = 0.f;
 
         CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
         float cx = scr.width * 0.5f, cy = scr.height * 0.5f;
         float side = fminf(scr.width, scr.height);
         float fovVal = g_fov.load();
-        bool fovUnlimited = fovVal >= 28.f; // slider max-ish = no FOV gate
-        float fovR = side * (0.05f + fovVal / 30.f * 0.45f);
-        if (fovR < 40.f) fovR = 40.f;
-
-        Vec3 cpos = get_pos(ok_ptr(aimTr) ? aimTr : camTr);
-        int localTeam = -1;
-        for (auto& s : snap) if (s.local) localTeam = s.team;
+        bool unlimited = fovVal >= 28.f;
+        float fovR = side * (0.08f + fovVal / 30.f * 0.5f);
+        if (fovR < 50.f) fovR = 50.f;
 
         float boneY = 1.55f;
         switch (g_bone.load()) {
@@ -1010,19 +885,14 @@ static void run_aim(void* cam, void* camTr) {
             default: boneY = 1.55f; break;
         }
 
-        // Aimbot = visible only; Silent = any in FOV, instant angles. No LookAt (ESP drift + crash).
-        Vec3 bestSilent{};
-        Vec3 bestAim{};
-        bool haveSilent = false;
-        bool haveAim = false;
-        float scoreSilent = 1e9f;
-        float scoreAim = 1e9f;
-
-        Vec3 eye = cpos;
-        eye.y += 1.45f;
+        // Separate targets: aimbot (visible) vs silent (any in FOV)
+        Vec3 bestAim{}, bestSilent{};
+        bool haveAim = false, haveSilent = false;
+        float scoreAim = 1e9f, scoreSilent = 1e9f;
+        Vec3 eye = cpos; eye.y += 1.4f;
 
         for (auto& p : snap) {
-            if (p.local) continue;
+            if (p.obj == localPc || p.local) continue;
             if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
             Vec3 base = p.pos;
@@ -1033,62 +903,70 @@ static void run_aim(void* cam, void* camTr) {
             Vec3 bone = {base.x, base.y + boneY, base.z};
 
             Vec3 sc = w2s(cam, bone);
-            if (sc.z < 0.05f) continue;
-            float sx = sc.x - 3.f;
-            float sy = (scr.height - sc.y) - 3.f;
-            float d2 = sqrtf((sx-cx)*(sx-cx) + (sy-cy)*(sy-cy));
-            if (!fovUnlimited && d2 > fovR) continue;
+            if (sc.z < 0.02f) continue;
+            float sx = sc.x;
+            float sy = scr.height - sc.y;
+            float d2 = sqrtf((sx - cx) * (sx - cx) + (sy - cy) * (sy - cy));
+            if (!unlimited && d2 > fovR) continue;
 
-            // Silent: always closest to crosshair in FOV (hits immediately)
+            // Silent: closest in FOV, through walls OK
             if (wantSilent && d2 < scoreSilent) {
                 scoreSilent = d2; bestSilent = bone; haveSilent = true;
             }
-            // Aimbot: only when visible (LOS); if check fails open → still aim
+            // Aimbot: visual track — optional LOS
             if (wantAim) {
-                bool vis = true;
-                if (g_aimVisible.load())
-                    vis = is_visible(eye, bone);
-                if (vis && d2 < scoreAim) {
+                if (g_aimVisible.load() && !is_visible(eye, bone)) continue;
+                if (d2 < scoreAim) {
                     scoreAim = d2; bestAim = bone; haveAim = true;
                 }
             }
         }
 
-        if (!haveSilent && !haveAim) { g_haveSilent = false; return; }
-
         g_haveSilent = haveSilent;
         if (haveSilent) g_silentTarget = bestSilent;
 
-        float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
-        float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
-        float curP = *aPitch, curY = *aYaw;
-        if (curP != curP || curY != curY) return;
-        if (fabsf(curP) > 400.f || fabsf(curY) > 800.f) return;
-
-        auto apply_angles = [&](Vec3 target, float smooth) {
+        auto calc_angles = [&](Vec3 target, float& outP, float& outY) {
             Vec3 dir = vnorm(vsub(target, cpos));
-            float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
-            float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
-            pitch = fmaxf(-85.f, fminf(85.f, pitch));
-            float dy = yaw - curY;
-            while (dy >  180.f) dy -= 360.f;
-            while (dy < -180.f) dy += 360.f;
-            if (smooth <= 1.01f) {
-                *aPitch = pitch;
-                *aYaw   = curY + dy;
-            } else {
-                *aPitch = curP + (pitch - curP) / smooth;
-                *aYaw   = curY + dy / smooth;
-            }
+            outY = atan2f(dir.x, dir.z) * 57.2957795f;
+            outP = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
+            outP = fmaxf(-85.f, fminf(85.f, outP));
         };
 
-        // Silent: hard angles (hits now). Aimbot alone: smooth + visible only.
-        // Never LookAt camTransform — that dragged ESP with the crosshair.
-        if (wantSilent && haveSilent) {
-            apply_angles(bestSilent, 1.f);
-        } else if (wantAim && haveAim) {
-            apply_angles(bestAim, fmaxf(1.f, g_smooth.load()));
+        // --- AIMBOT: moves the crosshair onto the player ---
+        if (wantAim && haveAim) {
+            float tp, ty;
+            calc_angles(bestAim, tp, ty);
+            float dy = ty - curY;
+            while (dy >  180.f) dy -= 360.f;
+            while (dy < -180.f) dy += 360.f;
+            float sm = fmaxf(1.f, g_smooth.load());
+            *aPitch = curP + (tp - curP) / sm;
+            *aYaw   = curY + dy / sm;
+            curP = *aPitch;
+            curY = *aYaw;
         }
+
+        // --- SILENT: hit without leaving the crosshair on the enemy ---
+        // Write target angles for this tick (shot uses them), restore user view next tick.
+        if (wantSilent && haveSilent) {
+            float tp, ty;
+            calc_angles(bestSilent, tp, ty);
+            float dy = ty - curY;
+            while (dy >  180.f) dy -= 360.f;
+            while (dy < -180.f) dy += 360.f;
+            // save the view the player should keep seeing
+            s_userP = wantAim ? *aPitch : curP; // if aimbot on, keep its visual aim
+            s_userY = wantAim ? *aYaw   : curY;
+            if (!wantAim) {
+                // pure silent: snap for hit registration only
+                *aPitch = tp;
+                *aYaw   = curY + dy;
+                s_needRestore = true; // restore user look next frame
+            }
+            // if aimbot also on, angles already on target visually — silent rides along
+        }
+
+        if (!wantSilent) s_needRestore = false;
 
     } @catch (...) {
         g_haveSilent = false;

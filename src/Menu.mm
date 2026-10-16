@@ -17,7 +17,7 @@ UIView* Astral_SecureRoot = nil;
 // ─── State ───────────────────────────────────────────────────────────────────
 std::atomic<bool>  g_aimbot{false};
 std::atomic<bool>  g_silent{false};
-std::atomic<bool>  g_aimVisible{true};
+std::atomic<bool>  g_aimVisible{false};
 std::atomic<bool>  g_fovDraw{false};
 std::atomic<bool>  g_espBox{false};
 std::atomic<bool>  g_espSkel{false};
@@ -32,8 +32,8 @@ std::atomic<bool>  g_noRecoil{false};
 std::atomic<float> g_recoilPct{0.f};      // 0=full, 100=zero
 std::atomic<bool>  g_hideRec{true};       // ON at launch
 std::atomic<bool>  g_menuOpen{false};
-std::atomic<float> g_fov{25.f};
-std::atomic<float> g_smooth{4.5f};
+std::atomic<float> g_fov{30.f};
+std::atomic<float> g_smooth{2.5f};
 std::atomic<int>   g_bone{0};
 std::atomic<int>   g_lang{0};             // 0 EN 1 RU
 std::atomic<uint32_t> g_menuColor{0xFF00E5A8};
