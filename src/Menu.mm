@@ -1,4 +1,4 @@
-// Menu.mm — CoreUI UI, stream-hide ON by default
+// Menu.mm — Astral UI, smooth, RU/EN, colors, stream-hide ON by default
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -7,12 +7,12 @@
 #include <atomic>
 #include <cstdint>
 
-void CoreUI_RebuildMenu(void);
-void CoreUI_FeaturesTick(void);
-void CoreUI_EnsureFOVOverlay(UIWindow* win);
-static void onCaptureChanged(void);
+void Astral_RebuildMenu(void);
 
-UIView* CoreUI_SecureRoot = nil;
+extern void Astral_FeaturesTick();
+extern void Astral_EnsureFOVOverlay(UIWindow* win);
+
+UIView* Astral_SecureRoot = nil;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 std::atomic<bool>  g_aimbot{false};
@@ -26,7 +26,8 @@ std::atomic<bool>  g_espWeapon{false};
 std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
-std::atomic<bool>  g_hideRec{true};       // ON — hide while screen is being captured
+std::atomic<float> g_recoilPct{0.f};      // 0=full, 100=zero
+std::atomic<bool>  g_hideRec{true};       // ON at launch
 std::atomic<bool>  g_menuOpen{false};
 std::atomic<float> g_fov{15.f};
 std::atomic<float> g_smooth{4.5f};
@@ -35,50 +36,54 @@ std::atomic<int>   g_lang{0};             // 0 EN 1 RU
 std::atomic<uint32_t> g_menuColor{0xFF1E90FF};
 
 // ─── Config persist (NSUserDefaults) ─────────────────────────────────────────
-void CoreUI_SaveConfig(void) {
+void Astral_SaveConfig(void) {
     NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
-    [d setBool:g_aimbot.load()   forKey:@"cui_aimbot"];
-    [d setBool:g_silent.load()   forKey:@"cui_silent"];
-    [d setBool:g_fovDraw.load()  forKey:@"cui_fovDraw"];
-    [d setBool:g_espBox.load()   forKey:@"cui_espBox"];
-    [d setBool:g_espSkel.load()  forKey:@"cui_espSkel"];
-    [d setBool:g_espName.load()  forKey:@"cui_espName"];
-    [d setBool:g_espHP.load()    forKey:@"cui_espHP"];
-    [d setBool:g_espWeapon.load()forKey:@"cui_espWeapon"];
-    [d setBool:g_espDist.load()  forKey:@"cui_espDist"];
-    [d setBool:g_espTeam.load()  forKey:@"cui_espTeam"];
-    [d setBool:g_noRecoil.load() forKey:@"cui_noRecoil"];
-    [d setBool:g_hideRec.load()  forKey:@"cui_privMode"];
-    [d setFloat:g_fov.load()     forKey:@"cui_fov"];
-    [d setFloat:g_smooth.load()  forKey:@"cui_smooth"];
-    [d setInteger:g_bone.load()  forKey:@"cui_bone"];
-    [d setInteger:g_lang.load()  forKey:@"cui_lang"];
-    [d setInteger:(NSInteger)g_menuColor.load() forKey:@"cui_menuColor"];
+    [d setBool:g_aimbot.load()   forKey:@"astral_aimbot"];
+    [d setBool:g_silent.load()   forKey:@"astral_silent"];
+    [d setBool:g_fovDraw.load()  forKey:@"astral_fovDraw"];
+    [d setBool:g_espBox.load()   forKey:@"astral_espBox"];
+    [d setBool:g_espSkel.load()  forKey:@"astral_espSkel"];
+    [d setBool:g_espName.load()  forKey:@"astral_espName"];
+    [d setBool:g_espHP.load()    forKey:@"astral_espHP"];
+    [d setBool:g_espWeapon.load()forKey:@"astral_espWeapon"];
+    [d setBool:g_espDist.load()  forKey:@"astral_espDist"];
+    [d setBool:g_espTeam.load()  forKey:@"astral_espTeam"];
+    [d setBool:g_noRecoil.load() forKey:@"astral_noRecoil"];
+    [d setFloat:g_recoilPct.load() forKey:@"astral_recoilPct"];
+    [d setBool:g_hideRec.load()  forKey:@"astral_hideRec"];
+    [d setFloat:g_fov.load()     forKey:@"astral_fov"];
+    [d setFloat:g_smooth.load()  forKey:@"astral_smooth"];
+    [d setInteger:g_bone.load()  forKey:@"astral_bone"];
+    [d setInteger:g_lang.load()  forKey:@"astral_lang"];
+    [d setInteger:(NSInteger)g_menuColor.load() forKey:@"astral_menuColor"];
     [d synchronize];
 }
 
-void CoreUI_LoadConfig(void) {
+void Astral_LoadConfig(void) {
     NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
-    if (![d objectForKey:@"cui_privMode"]) return; // first launch — keep defaults
-    g_aimbot.store([d boolForKey:@"cui_aimbot"]);
-    g_silent.store([d boolForKey:@"cui_silent"]);
-    g_fovDraw.store([d boolForKey:@"cui_fovDraw"]);
-    g_espBox.store([d boolForKey:@"cui_espBox"]);
-    g_espSkel.store([d boolForKey:@"cui_espSkel"]);
-    g_espName.store([d boolForKey:@"cui_espName"]);
-    g_espHP.store([d boolForKey:@"cui_espHP"]);
-    g_espWeapon.store([d boolForKey:@"cui_espWeapon"]);
-    g_espDist.store([d boolForKey:@"cui_espDist"]);
-    g_espTeam.store([d boolForKey:@"cui_espTeam"]);
-    g_noRecoil.store([d boolForKey:@"cui_noRecoil"]);
-    g_hideRec.store([d boolForKey:@"cui_privMode"]);
-    float f = [d floatForKey:@"cui_fov"];
+    if (![d objectForKey:@"astral_hideRec"]) return; // first launch — keep defaults
+    g_aimbot.store([d boolForKey:@"astral_aimbot"]);
+    g_silent.store([d boolForKey:@"astral_silent"]);
+    g_fovDraw.store([d boolForKey:@"astral_fovDraw"]);
+    g_espBox.store([d boolForKey:@"astral_espBox"]);
+    g_espSkel.store([d boolForKey:@"astral_espSkel"]);
+    g_espName.store([d boolForKey:@"astral_espName"]);
+    g_espHP.store([d boolForKey:@"astral_espHP"]);
+    g_espWeapon.store([d boolForKey:@"astral_espWeapon"]);
+    g_espDist.store([d boolForKey:@"astral_espDist"]);
+    g_espTeam.store([d boolForKey:@"astral_espTeam"]);
+    g_noRecoil.store([d boolForKey:@"astral_noRecoil"]);
+    float rp = [d floatForKey:@"astral_recoilPct"];
+    if (rp >= 0.f && rp <= 100.f) g_recoilPct.store(rp);
+    else if (g_noRecoil.load()) g_recoilPct.store(100.f);
+    g_hideRec.store([d boolForKey:@"astral_hideRec"]);
+    float f = [d floatForKey:@"astral_fov"];
     if (f > 0.5f && f < 40.f) g_fov.store(f);
-    float sm = [d floatForKey:@"cui_smooth"];
+    float sm = [d floatForKey:@"astral_smooth"];
     if (sm >= 1.f && sm <= 20.f) g_smooth.store(sm);
-    g_bone.store((int)[d integerForKey:@"cui_bone"]);
-    g_lang.store((int)[d integerForKey:@"cui_lang"]);
-    NSInteger col = [d integerForKey:@"cui_menuColor"];
+    g_bone.store((int)[d integerForKey:@"astral_bone"]);
+    g_lang.store((int)[d integerForKey:@"astral_lang"]);
+    NSInteger col = [d integerForKey:@"astral_menuColor"];
     if (col != 0) g_menuColor.store((uint32_t)col);
 }
 
@@ -102,10 +107,10 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 // ─── Window that never steals game touches ───────────────────────────────────
 
 // ── Drag ─────────────────────────────────────────────────────────────────────
-@interface CoreUIDrag : NSObject
+@interface AstralDrag : NSObject
 + (void)attach:(UIView*)v;
 @end
-@implementation CoreUIDrag
+@implementation AstralDrag
 + (void)attach:(UIView*)v {
     if (!v) return;
     for (UIGestureRecognizer* g in v.gestureRecognizers) {
@@ -209,66 +214,85 @@ static int           g_section = 0;
 static NSArray<UIButton*>* g_tabBtns = nil;
 
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
-// ─── Hide while screen is captured (no secure UITextField → home indicator can fade)
-static void setCheatChromeHidden(BOOL hidden) {
-    extern UIView* g_esp_view(void);
-    UIView* esp = g_esp_view();
-    if (esp) esp.hidden = hidden;
-    if (g_panel) {
-        if (hidden) {
-            g_panel.hidden = YES;
-            g_panel.alpha = 0;
-        } else {
-            // restore only if menu should be open
-            bool open = g_menuOpen.load();
-            g_panel.hidden = !open;
-            g_panel.alpha = open ? 1.0 : 0.0;
-        }
-    }
-    if (g_fab) {
-        if (hidden) {
-            g_fab.alpha = 0.0;
-        } else {
-            g_fab.alpha = g_menuOpen.load() ? 0.90 : 0.40;
-            g_fab.hidden = NO;
-        }
-    }
-}
-
-static void onCaptureChanged(void) {
-    if (!g_hideRec.load()) {
-        setCheatChromeHidden(NO);
-        return;
-    }
-    BOOL captured = NO;
-    if (@available(iOS 11.0, *)) {
-        captured = UIScreen.mainScreen.isCaptured;
-    }
-    setCheatChromeHidden(captured);
-}
-
 static void applyHideRec(UIView* root) {
-    (void)root;
-    // one-time observer
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        if (@available(iOS 11.0, *)) {
-            [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenCapturedDidChangeNotification
-                                                            object:nil
-                                                             queue:NSOperationQueue.mainQueue
-                                                        usingBlock:^(__unused NSNotification* n) {
-                onCaptureChanged();
-            }];
+    // Overlay root only. Everything (ESP + FAB + panel) goes inside secure
+    // so screen recording / screenshots show black where the cheat UI is.
+    if (!root) return;
+    BOOL on = g_hideRec.load();
+
+    if (on) {
+        if (!g_secureField) {
+            g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
+            g_secureField.secureTextEntry = YES;
+            g_secureField.backgroundColor = UIColor.clearColor;
+            g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         }
-    });
-    // no full-screen secure UITextField — that was keeping the home indicator lit
-    if (g_secureField) {
-        [g_secureField removeFromSuperview];
-        g_secureField = nil;
+        g_secureField.frame = root.bounds;
+        // YES so children (menu/fab) can receive touches; ACW.pointInside still
+        // filters to panel/fab only so Google/game are fine.
+        g_secureField.userInteractionEnabled = YES;
+        if (g_secureField.superview != root)
+            [root insertSubview:g_secureField atIndex:0];
+
+        [g_secureField layoutIfNeeded];
+        UIView* container = nil;
+        for (UIView* s in g_secureField.subviews) {
+            if (s.bounds.size.width >= root.bounds.size.width * 0.9) {
+                container = s; break;
+            }
+        }
+        if (!container) {
+            container = [[UIView alloc] initWithFrame:root.bounds];
+            container.backgroundColor = UIColor.clearColor;
+            container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [g_secureField addSubview:container];
+        }
+        container.frame = root.bounds;
+        container.userInteractionEnabled = YES;
+        Astral_SecureRoot = container;
+
+        // Move panel + FAB + ESP into secure container → hidden on recording
+        if (g_panel && g_panel.superview != container) {
+            [g_panel removeFromSuperview];
+            [container addSubview:g_panel];
+        }
+        if (g_fab && g_fab.superview != container) {
+            [g_fab removeFromSuperview];
+            [container addSubview:g_fab];
+        }
+        extern UIView* g_esp_view(void);
+        UIView* esp = g_esp_view();
+        if (esp && esp.superview != container) {
+            [esp removeFromSuperview];
+            [container insertSubview:esp atIndex:0];
+        }
+    } else {
+        Astral_SecureRoot = nil;
+        // Move chrome back to overlay root
+        if (g_panel && g_panel.superview != root) {
+            [g_panel removeFromSuperview];
+            [root addSubview:g_panel];
+        }
+        if (g_fab && g_fab.superview != root) {
+            [g_fab removeFromSuperview];
+            [root addSubview:g_fab];
+        }
+        extern UIView* g_esp_view(void);
+        UIView* esp = g_esp_view();
+        if (esp && esp.superview != root) {
+            [esp removeFromSuperview];
+            [root insertSubview:esp atIndex:0];
+        }
+        if (g_secureField) {
+            [g_secureField removeFromSuperview];
+            g_secureField = nil;
+        }
     }
-    CoreUI_SecureRoot = nil;
-    onCaptureChanged();
+    if (g_panel) [g_panel.superview bringSubviewToFront:g_panel];
+    if (g_fab)   [g_fab.superview bringSubviewToFront:g_fab];
+    Astral_EnsureFOVOverlay(g_hostWin);
 }
+
 
 static UIView* makeSwitch(NSString* title, NSString* sub, bool on, void(^cb)(bool)) {
     UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,54)];
@@ -386,8 +410,8 @@ static UIView* makeColorRow(NSString* title) {
         [b addAction:[UIAction actionWithHandler:^(__kindof UIAction* a) {
             g_menuColor.store(col);
             // rebuild to refresh accents
-            extern void CoreUI_RebuildMenu(void);
-            CoreUI_RebuildMenu();
+            extern void Astral_RebuildMenu(void);
+            Astral_RebuildMenu();
         }] forControlEvents:UIControlEventTouchUpInside];
         [row addSubview:b];
         x += 30;
@@ -407,52 +431,55 @@ static void rebuildContent() {
     };
 
     if (g_section == 0) { // Aim
-        add(makeSwitch(L("Core","Ядро"),
+        add(makeSwitch(L("Aim bot","Аимбот"),
                        L("Automatically aims at enemies","Автоматически наводится на врагов"),
-                       g_aimbot.load(), ^(bool v){ g_aimbot=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Quiet","Тихий"),
+                       g_aimbot.load(), ^(bool v){ g_aimbot=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("Silent","Сайлент"),
                        L("Hides your aim from other players","Скрывает наводку от других"),
-                       g_silent.load(), ^(bool v){ g_silent=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Ring","Кольцо"),
+                       g_silent.load(), ^(bool v){ g_silent=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("FOV Circle","Круг FOV"),
                        L("Shows the aim range circle","Показывает круг зоны аима"),
-                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; CoreUI_SaveConfig(); }));
-        add(makeSlider(L("Range","Диап"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; }));
-        add(makeSlider(L("Smooth","Плавн"), g_smooth.load(), 1, 15, ^(float v){ g_smooth=v; }));
+                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; Astral_SaveConfig(); }));
+        add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; }));
+        add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 15, ^(float v){ g_smooth=v; }));
         add(makeSegment(L("Bone","Кость"),
                         g_lang.load()==1 ? @[@"Голова",@"Шея",@"Грудь"] : @[@"Head",@"Neck",@"Chest"],
                         g_bone.load(), ^(int v){ g_bone=v; }));
     }
     else if (g_section == 1) { // Visuals
-        add(makeSwitch(L("Layer A","Слой A"),
+        add(makeSwitch(L("Box ESP","Бокс ESP"),
                        L("2D box around players","Рамка вокруг игроков"),
-                       g_espBox.load(), ^(bool v){ g_espBox=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Layer B","Слой B"),
+                       g_espBox.load(), ^(bool v){ g_espBox=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("Skeleton","Скелет"),
                        L("Bone lines","Линии костей"),
-                       g_espSkel.load(), ^(bool v){ g_espSkel=v; CoreUI_SaveConfig(); }));
+                       g_espSkel.load(), ^(bool v){ g_espSkel=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Names","Ники"),
                        L("Player name tags","Никнеймы игроков"),
-                       g_espName.load(), ^(bool v){ g_espName=v; CoreUI_SaveConfig(); }));
+                       g_espName.load(), ^(bool v){ g_espName=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Health bar","Здоровье"),
                        L("HP bar + percent","Полоска HP + проценты"),
-                       g_espHP.load(), ^(bool v){ g_espHP=v; CoreUI_SaveConfig(); }));
+                       g_espHP.load(), ^(bool v){ g_espHP=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Weapon","Оружие"),
                        L("Weapon icon under player","Иконка оружия"),
-                       g_espWeapon.load(), ^(bool v){ g_espWeapon=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Range","Дист"),
+                       g_espWeapon.load(), ^(bool v){ g_espWeapon=v; Astral_SaveConfig(); }));
+        add(makeSwitch(L("Distance","Дистанция"),
                        L("Distance in meters","Дистанция в метрах"),
-                       g_espDist.load(), ^(bool v){ g_espDist=v; CoreUI_SaveConfig(); }));
+                       g_espDist.load(), ^(bool v){ g_espDist=v; Astral_SaveConfig(); }));
         add(makeSwitch(L("Team check","Свои"),
                        L("Ignore teammates","Игнорировать союзников"),
-                       g_espTeam.load(), ^(bool v){ g_espTeam=v; CoreUI_SaveConfig(); }));
+                       g_espTeam.load(), ^(bool v){ g_espTeam=v; Astral_SaveConfig(); }));
     }
     else if (g_section == 2) { // Misc
-        add(makeSwitch(L("Stable","Стаб"),
-                       L("Reduce weapon recoil","Убрать отдачу"),
-                       g_noRecoil.load(), ^(bool v){ g_noRecoil=v; CoreUI_SaveConfig(); }));
+        add(makeSlider(L("Recoil %","Отдача %"),
+                       g_recoilPct.load(), 0, 100, ^(float v){
+                           g_recoilPct=v;
+                           g_noRecoil.store(v >= 99.f);
+                           Astral_SaveConfig();
+                       }));
         add(makeSwitch(L("Hide from recording","Скрытие записи"),
-                       L("Privacy mode","Режим приватности"),
+                       L("Hide menu & ESP on screenshots/record","Скрыть меню и ESP на скринах"),
                        g_hideRec.load(), ^(bool v){
-                           g_hideRec=v; CoreUI_SaveConfig();
+                           g_hideRec=v; Astral_SaveConfig();
                            UIView* root = g_hostWin ? g_hostWin.rootViewController.view : nil;
                            applyHideRec(root);
                        }));
@@ -462,8 +489,8 @@ static void rebuildContent() {
                         @[@"English", @"Русский"],
                         g_lang.load(), ^(int v){
                             g_lang=v;
-                            extern void CoreUI_RebuildMenu(void);
-                            CoreUI_RebuildMenu();
+                            extern void Astral_RebuildMenu(void);
+                            Astral_RebuildMenu();
                         }));
         add(makeColorRow(L("Menu color","Цвет меню")));
         add(makeSwitch(L("Menu open","Меню открыто"),
@@ -471,8 +498,6 @@ static void rebuildContent() {
                        g_menuOpen.load(), ^(bool v){
                            g_menuOpen=v;
                            g_panel.hidden = !v;
-                           g_panel.alpha = v ? 1.0 : 0.0;
-                           if (g_fab) g_fab.alpha = v ? 0.90 : 0.40;
                        }));
     }
 
@@ -480,7 +505,7 @@ static void rebuildContent() {
     g_scroll.contentSize = CGSizeMake(320, y + 20);
 }
 
-void CoreUI_RebuildMenu(void) {
+void Astral_RebuildMenu(void) {
     // refresh tab titles + accent + content
     if (g_tabBtns) {
         NSArray* titles = g_lang.load()==1
@@ -516,12 +541,12 @@ static void buildPanel(UIView* host) {
 
     // Logo
     UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 28)];
-    logo.text = @"COREUI";
+    logo.text = @"ASTRAL";
     logo.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     logo.textColor = Accent();
     [g_panel addSubview:logo];
     UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 120, 14)];
-    sub.text = @"SYSTEM";
+    sub.text = @"CHEATS";
     sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
     sub.textColor = C(0.3,0.85,1,1);
     [g_panel addSubview:sub];
@@ -561,7 +586,7 @@ static void buildPanel(UIView* host) {
     [g_scroll addSubview:g_content];
 
     [host addSubview:g_panel];
-    [CoreUIDrag attach:g_panel];
+    [AstralDrag attach:g_panel];
     rebuildContent();
 }
 
@@ -577,18 +602,15 @@ static void buildPanel(UIView* host) {
 }
 - (void)toggle {
     extern UIView* g_panel_ref(void);
-    extern UIView* g_fab_ref(void);
     bool open = !g_menuOpen.load();
     g_menuOpen = open;
     UIView* panel = g_panel_ref();
-    UIView* fab = g_fab_ref();
     if (!panel) return;
     panel.hidden = NO;
     [panel.superview bringSubviewToFront:panel];
-    [UIView animateWithDuration:0.22 animations:^{
+    [UIView animateWithDuration:0.2 animations:^{
         panel.alpha = open ? 1.0 : 0.0;
         panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.94, 0.94);
-        if (fab) fab.alpha = open ? 0.90 : 0.40; // dim when closed, bright when open
     } completion:^(BOOL f) {
         if (!open) panel.hidden = YES;
     }];
@@ -597,25 +619,31 @@ static void buildPanel(UIView* host) {
 
 static void buildFab(UIView* host) {
     if (g_fab) return;
-    // Tiny dim handle top-right — visible enough to find, no glow
-    CGFloat x = MAX(12, host.bounds.size.width - 44);
-    if (x < 12) x = 12;
-    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 28, 28, 28)];
-    g_fab.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
-    g_fab.layer.cornerRadius = 14;
-    g_fab.layer.borderWidth = 0.5;
-    g_fab.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.20].CGColor;
-    g_fab.layer.shadowOpacity = 0;
-    g_fab.layer.shadowRadius = 0;
-    g_fab.alpha = 0.40; // closed: dim but findable
+    // Visible position: top-right in landscape-ish coords
+    CGFloat x = MAX(16, host.bounds.size.width - 70);
+    if (x < 20) x = 20;
+    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 40, 52, 52)];
+    g_fab.backgroundColor = Accent();
+    g_fab.layer.cornerRadius = 26;
+    g_fab.layer.shadowColor = Accent().CGColor;
+    g_fab.layer.shadowOpacity = 0.55;
+    g_fab.layer.shadowRadius = 10;
     g_fab.userInteractionEnabled = YES;
+    UILabel* star = [[UILabel alloc] initWithFrame:g_fab.bounds];
+    star.text = @"✦";
+    star.textAlignment = NSTextAlignmentCenter;
+    star.font = [UIFont systemFontOfSize:24];
+    star.textColor = UIColor.whiteColor;
+    star.userInteractionEnabled = NO;
+    [g_fab addSubview:star];
     UIButton* btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = g_fab.bounds;
-    btn.accessibilityLabel = @"menu";
+    btn.accessibilityLabel = @"AstralMenu";
     [btn addTarget:[FabToggle shared] action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
-    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:[CoreUIDrag class] action:@selector(onPan:)];
+    // Drag only after movement — don't kill taps
+    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:[AstralDrag class] action:@selector(onPan:)];
     pan.maximumNumberOfTouches = 1;
     pan.cancelsTouchesInView = NO;
     [g_fab addGestureRecognizer:pan];
@@ -652,7 +680,7 @@ static void buildFab(UIView* host) {
 
 + (void)tryAttach {
     static dispatch_once_t onceCfg;
-    dispatch_once(&onceCfg, ^{ CoreUI_LoadConfig(); });
+    dispatch_once(&onceCfg, ^{ Astral_LoadConfig(); });
     UIWindow* key = [self gameWindow];
     if (!key) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)),
@@ -684,7 +712,7 @@ static void buildFab(UIView* host) {
     buildPanel(root);
     buildFab(root);
     applyHideRec(root);   // secure + ESP only inside OVERLAY
-    CoreUI_EnsureFOVOverlay(g_hostWin);
+    Astral_EnsureFOVOverlay(g_hostWin);
 
     if (g_panel) [root bringSubviewToFront:g_panel];
     if (g_fab)   [root bringSubviewToFront:g_fab];
@@ -707,48 +735,47 @@ static void buildFab(UIView* host) {
     }
     if (g_hostWin) {
         UIView* root = g_hostWin.rootViewController.view;
-        CoreUI_EnsureFOVOverlay(g_hostWin);
-        if (g_panel) [root bringSubviewToFront:g_panel];
-        if (g_fab)   [root bringSubviewToFront:g_fab];
+        // keep secure full-size — interaction MUST stay YES so panel/fab receive touches
+        if (g_secureField) {
+            g_secureField.frame = root.bounds;
+            g_secureField.userInteractionEnabled = YES;
+            if (Astral_SecureRoot) {
+                Astral_SecureRoot.frame = root.bounds;
+                Astral_SecureRoot.userInteractionEnabled = YES;
+            }
+        }
+        // re-home ESP into secure container every tick when hide is on
+        if (g_hideRec.load() && Astral_SecureRoot) {
+            extern UIView* g_esp_view(void);
+            UIView* esp = g_esp_view();
+            if (esp && esp.superview != Astral_SecureRoot) {
+                [esp removeFromSuperview];
+                [Astral_SecureRoot insertSubview:esp atIndex:0];
+            }
+            if (g_panel && g_panel.superview != Astral_SecureRoot) {
+                [g_panel removeFromSuperview];
+                [Astral_SecureRoot addSubview:g_panel];
+            }
+            if (g_fab && g_fab.superview != Astral_SecureRoot) {
+                [g_fab removeFromSuperview];
+                [Astral_SecureRoot addSubview:g_fab];
+            }
+        }
+        Astral_EnsureFOVOverlay(g_hostWin);
+        UIView* front = Astral_SecureRoot ?: root;
+        if (g_panel) [front bringSubviewToFront:g_panel];
+        if (g_fab)   [front bringSubviewToFront:g_fab];
     }
-    onCaptureChanged();
-    CoreUI_FeaturesTick();
+    Astral_FeaturesTick();
 }
 
 
 @end
 
-
-// wipe private-client logs so they never stay in Files
-static void wipe_docs(void) {
-    NSString* home = NSHomeDirectory();
-    if (!home) return;
-    NSArray* names = @[@"Documents/boot.log", @"Documents/sr_host.txt",
-                       @"boot.log", @"sr_host.txt"];
-    for (NSString* n in names) {
-        NSString* path = [home stringByAppendingPathComponent:n];
-        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-    }
-    NSString* docs = [home stringByAppendingPathComponent:@"Documents"];
-    NSArray* files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:docs error:nil];
-    for (NSString* f in files) {
-        if ([f.pathExtension.lowercaseString isEqualToString:@"log"]) {
-            [[NSFileManager defaultManager] removeItemAtPath:[docs stringByAppendingPathComponent:f] error:nil];
-        }
-    }
-}
-
 __attribute__((constructor))
-static void coreui_ctor() {
-    wipe_docs();
+static void astral_ctor() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        wipe_docs();
         [ACH start];
     });
-    // keep wiping for a few seconds in case client recreates logs
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ wipe_docs(); });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ wipe_docs(); });
 }

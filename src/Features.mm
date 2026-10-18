@@ -1,4 +1,4 @@
-// Features.mm — ESP / Aim / NoRecoil (compile-clean)
+// Features.mm — corner ESP, visible, FOV aim, silent (angles only), no SO recoil
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
@@ -12,16 +12,20 @@
 #include <vector>
 #include <mutex>
 
-extern UIView* CoreUI_SecureRoot;
+extern UIView* Astral_SecureRoot;
 
 struct Vec3 { float x, y, z; };
-struct Vec4 { float x, y, z, w; };
+struct RayHit {
+    float px, py, pz;
+    float nx, ny, nz;
+    unsigned face;
+    float distance;
+    void* collider;
+    // rest ignored
+};
 
 static inline float vlen(Vec3 v) { return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z); }
 static inline Vec3  vsub(Vec3 a, Vec3 b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
-static inline Vec3  vadd(Vec3 a, Vec3 b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
-static inline Vec3  vmul(Vec3 v, float s) { return {v.x*s, v.y*s, v.z*s}; }
-static inline float vdot(Vec3 a, Vec3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
 static inline Vec3  vnorm(Vec3 v) {
     float l = vlen(v);
     if (l < 1e-6f) return {0, 0, 1};
@@ -45,96 +49,106 @@ static uintptr_t unity_base() {
 template<typename Fn>
 static Fn R(uint64_t o) { return (Fn)(unity_base() + o); }
 
-static bool alive(void* o) {
-    if (!o || ((uintptr_t)o & 7) != 0) return false;
-    return *(void**)((char*)o + 0x10) != nullptr;
+static bool ok_ptr(void* o) {
+    if (!o) return false;
+    uintptr_t a = (uintptr_t)o;
+    return a > 0x10000 && (a & 1) == 0;
 }
 
 static Vec3 get_pos(void* tr) {
     Vec3 o{};
-    if (!tr || !unity_base()) return o;
+    if (!ok_ptr(tr) || !unity_base()) return o;
     using F = void (*)(void*, Vec3*);
     R<F>(Offsets::Transform_get_position_Injected)(tr, &o);
     return o;
 }
+
 static void* main_cam() {
     if (!unity_base()) return nullptr;
     using F = void* (*)();
     return R<F>(Offsets::Camera_get_main)();
 }
+
 static void* get_tr(void* c) {
-    if (!c || !unity_base()) return nullptr;
+    if (!ok_ptr(c) || !unity_base()) return nullptr;
     using F = void* (*)(void*);
     return R<F>(Offsets::Component_get_transform)(c);
 }
+
 static void* pc_tr(void* pc) {
-    if (!pc) return nullptr;
+    if (!ok_ptr(pc)) return nullptr;
     void* t = *(void**)((char*)pc + Offsets::PC_transform);
-    if (t && alive(t)) return t;
+    if (ok_ptr(t)) return t;
     return get_tr(pc);
 }
+
 static Vec3 w2s(void* cam, Vec3 w) {
     Vec3 o{};
-    if (!cam || !unity_base()) return o;
+    if (!ok_ptr(cam) || !unity_base()) return o;
     using F = void (*)(void*, Vec3*, int, Vec3*);
     R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
+    UIScreen* sc = [UIScreen mainScreen];
+    float s = (float)sc.nativeScale;
+    if (s < 1.f) s = (float)sc.scale;
+    if (s < 1.f) s = 1.f;
+    o.x /= s;
+    o.y /= s;
     return o;
 }
-static void set_rot(void* tr, Vec4 q) {
-    if (!tr || !unity_base()) return;
-    using F = void (*)(void*, Vec4*);
-    R<F>(0x3323EAC)(tr, &q);
-}
-static void look_at(void* tr, Vec3 world) {
-    if (!tr || !unity_base()) return;
-    Vec3 up{0, 1, 0};
-    using F = void (*)(void*, Vec3*, Vec3*);
-    R<F>(Offsets::Transform_Internal_LookAt_Inj)(tr, &world, &up);
-}
 
-static Vec4 quat_from_dir(Vec3 f) {
-    f = vnorm(f);
-    Vec3 up{0, 1, 0};
-    if (fabsf(vdot(f, up)) > 0.99f) up = {1, 0, 0};
-    Vec3 r = vnorm({up.y*f.z - up.z*f.y, up.z*f.x - up.x*f.z, up.x*f.y - up.y*f.x});
-    Vec3 u = {f.y*r.z - f.z*r.y, f.z*r.x - f.x*r.z, f.x*r.y - f.y*r.x};
-    float t = r.x + u.y + f.z;
-    Vec4 q{};
-    if (t > 0) {
-        float s = 0.5f / sqrtf(t + 1.f);
-        q.w = 0.25f / s; q.x = (u.z - f.y)*s; q.y = (f.x - r.z)*s; q.z = (r.y - u.x)*s;
-    } else if (r.x > u.y && r.x > f.z) {
-        float s = 2.f * sqrtf(1.f + r.x - u.y - f.z);
-        q.w = (u.z - f.y)/s; q.x = 0.25f*s; q.y = (u.x + r.y)/s; q.z = (f.x + r.z)/s;
-    } else if (u.y > f.z) {
-        float s = 2.f * sqrtf(1.f + u.y - r.x - f.z);
-        q.w = (f.x - r.z)/s; q.x = (u.x + r.y)/s; q.y = 0.25f*s; q.z = (f.y + u.z)/s;
-    } else {
-        float s = 2.f * sqrtf(1.f + f.z - r.x - u.y);
-        q.w = (r.y - u.x)/s; q.x = (f.x + r.z)/s; q.y = (f.y + u.z)/s; q.z = 0.25f*s;
-    }
-    return q;
+// Visible: Linecast cam→target. If hit closer than target - blocked.
+static bool is_visible(Vec3 from, Vec3 to) {
+    if (!unity_base()) return true;
+    RayHit hit{};
+    // Physics.Linecast(start, end, out hit, layerMask) RVA 0x336EA3C
+    using F = bool (*)(Vec3*, Vec3*, RayHit*, int);
+    bool blocked = R<F>(0x336EA3C)(&from, &to, &hit, ~0);
+    if (!blocked) return true;
+    float need = vdist(from, to) - 0.35f;
+    return hit.distance >= need;
 }
 
 struct PSnap {
     void* obj;
     void* tr;
-    Vec3 pos;
-    int team;
-    bool local;
-    char name[32];
+    Vec3  pos;
+    int   team;
+    bool  local;
+    float hp;      // 0..1 or -1
+    float armor;   // -1 unknown
+    int   ammo;    // -1 unknown
+    char  name[32];
+    char  weapon[24];
 };
 static std::mutex g_mtx;
 static std::vector<PSnap> g_list;
 static int g_ctr = 0;
+static Vec3 g_silentTarget{};
+static bool g_haveSilent = false;
 
 static int team_of(void* pc) {
-    return pc ? (int)*(uint8_t*)((char*)pc + Offsets::PC_team) : -1;
+    if (!ok_ptr(pc)) return -1;
+    return (int)*(uint8_t*)((char*)pc + Offsets::PC_team);
+}
+
+static float read_hp01(void* pc) {
+    // best-effort: PlayerHitController @ 0x88 — scan a few floats for 0..100 range
+    if (!ok_ptr(pc)) return -1.f;
+    void* hit = *(void**)((char*)pc + Offsets::PC_hitController);
+    if (!ok_ptr(hit)) return -1.f;
+    // try common relative floats
+    const size_t cands[] = {0xC8, 0xD0, 0xD4, 0xD8, 0x4C, 0x50};
+    for (size_t o : cands) {
+        float v = *(float*)((char*)hit + o);
+        if (v == v && v > 1.f && v <= 100.f) return v / 100.f;
+        if (v == v && v > 0.f && v <= 1.f) return v;
+    }
+    return -1.f;
 }
 
 static void read_str(void* strObj, char* out, size_t n) {
     out[0] = 0;
-    if (!strObj || n < 2) return;
+    if (!ok_ptr(strObj) || n < 2) return;
     int32_t len = *(int32_t*)((char*)strObj + 0x10);
     if (len <= 0 || len > 40) return;
     auto* ch = (const uint16_t*)((char*)strObj + 0x14);
@@ -147,7 +161,7 @@ static void read_str(void* strObj, char* out, size_t n) {
 }
 
 static void push_array(void* arrObj, std::vector<void*>& out, Il2CppApi& api) {
-    if (!arrObj) return;
+    if (!ok_ptr(arrObj)) return;
     auto* a = (Il2CppArraySimple*)arrObj;
     uintptr_t n = a->max_length;
     if (api.array_length)
@@ -155,7 +169,7 @@ static void push_array(void* arrObj, std::vector<void*>& out, Il2CppApi& api) {
     if (n > 48) n = 48;
     for (uintptr_t i = 0; i < n; i++) {
         void* o = a->vector[i];
-        if (alive(o)) out.push_back(o);
+        if (ok_ptr(o)) out.push_back(o);
     }
 }
 
@@ -195,44 +209,109 @@ static std::vector<void*> collect_players() {
 }
 
 static bool is_mine(void* pc) {
-    if (!pc || !unity_base()) return false;
+    if (!ok_ptr(pc) || !unity_base()) return false;
     void* pv = *(void**)((char*)pc + Offsets::PC_photonView);
-    if (!alive(pv)) return false;
+    if (!ok_ptr(pv)) return false;
     using F = bool (*)(void*);
     return R<F>(Offsets::PhotonView_get_isMine)(pv);
 }
 
 static void refresh(void* camTr) {
     std::vector<PSnap> tmp;
-    if (!camTr || !alive(camTr)) {
+    if (!ok_ptr(camTr)) {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_list.swap(tmp);
         return;
     }
     auto raw = collect_players();
+    Vec3 cpos = get_pos(camTr);
+    float bestD = 1e9f;
+    size_t bestIdx = 0;
+    int mines = 0;
 
     for (void* pc : raw) {
         void* tr = pc_tr(pc);
-        if (!tr || !alive(tr)) continue;
+        if (!ok_ptr(tr)) continue;
         Vec3 p = get_pos(tr);
-        if (p.x != p.x) continue;
+        if (p.x != p.x || fabsf(p.x) > 1e5f) continue;
+
         PSnap s{};
         s.obj = pc;
-        s.tr = tr;
+        s.tr  = tr;
         s.pos = p;
         s.team = team_of(pc);
         s.local = is_mine(pc);
+        s.hp = read_hp01(pc);
+        s.armor = -1.f;
+        s.ammo = -1;
+        s.weapon[0] = 0;
+        // weapon name + ammo from GunController
+        void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
+        if (ok_ptr(wry)) {
+            void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
+            if (!ok_ptr(wc) && unity_base()) {
+                using F = void* (*)(void*);
+                wc = R<F>(0x162E58C)(wry);
+            }
+            if (ok_ptr(wc)) {
+                void* ns = *(void**)((char*)wc + 0x58); // name string
+                if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
+                int a0 = *(int*)((char*)wc + 0xD8);
+                int a1 = *(int*)((char*)wc + 0xDC);
+                if (a0 >= 0 && a0 <= 200) s.ammo = a0;
+                else if (a1 >= 0 && a1 <= 200) s.ammo = a1;
+            }
+        }
+        // armor best-effort from hit controller floats
+        void* hit = *(void**)((char*)pc + Offsets::PC_hitController);
+        if (ok_ptr(hit)) {
+            for (size_t o : {0xC8ul, 0xD0ul, 0xD4ul, 0xD8ul}) {
+                float v = *(float*)((char*)hit + o);
+                if (v == v && v >= 1.f && v <= 100.f && s.hp < 0.f) {
+                    // already used for hp candidates; skip
+                }
+                if (v == v && v >= 0.f && v <= 100.f && s.armor < 0.f && o == 0xD4) {
+                    s.armor = v;
+                }
+            }
+        }
+        if (s.local) mines++;
+        float d = vdist(p, cpos);
+        if (d < bestD) { bestD = d; bestIdx = tmp.size(); }
         s.name[0] = 0;
         void* pp = *(void**)((char*)pc + Offsets::PC_photonPlayer);
-        if (alive(pp)) {
+        if (ok_ptr(pp)) {
             void* ns = *(void**)((char*)pp + Offsets::PP_nameField);
-            if (ns) read_str(ns, s.name, sizeof(s.name));
+            if (ok_ptr(ns)) read_str(ns, s.name, sizeof(s.name));
         }
         if (!s.name[0]) snprintf(s.name, sizeof(s.name), "P");
         tmp.push_back(s);
     }
+    if (mines == 0 && !tmp.empty() && bestD < 5.f)
+        tmp[bestIdx].local = true;
+
     std::lock_guard<std::mutex> lk(g_mtx);
     g_list.swap(tmp);
+}
+
+static void draw_corner(CGContextRef ctx, CGFloat l, CGFloat t, CGFloat w, CGFloat h, CGFloat len) {
+    // 4 corners
+    CGContextMoveToPoint(ctx, l, t + len);
+    CGContextAddLineToPoint(ctx, l, t);
+    CGContextAddLineToPoint(ctx, l + len, t);
+
+    CGContextMoveToPoint(ctx, l + w - len, t);
+    CGContextAddLineToPoint(ctx, l + w, t);
+    CGContextAddLineToPoint(ctx, l + w, t + len);
+
+    CGContextMoveToPoint(ctx, l, t + h - len);
+    CGContextAddLineToPoint(ctx, l, t + h);
+    CGContextAddLineToPoint(ctx, l + len, t + h);
+
+    CGContextMoveToPoint(ctx, l + w - len, t + h);
+    CGContextAddLineToPoint(ctx, l + w, t + h);
+    CGContextAddLineToPoint(ctx, l + w, t + h - len);
+    CGContextStrokePath(ctx);
 }
 
 @interface ESPView : UIView @end
@@ -260,12 +339,13 @@ UIView* g_esp_view(void) { return g_esp; }
     bool skel = g_espSkel.load();
     bool nameOn = g_espName.load();
     bool distOn = g_espDist.load();
-    if (!box && !skel && !nameOn && !distOn) return;
+    bool hpOn = g_espHP.load();
+    if (!box && !skel && !nameOn && !distOn && !hpOn) return;
 
     void* cam = main_cam();
-    if (!alive(cam)) return;
+    if (!ok_ptr(cam)) return;
     void* camTr = get_tr(cam);
-    Vec3 cpos = camTr ? get_pos(camTr) : Vec3{};
+    Vec3 cpos = ok_ptr(camTr) ? get_pos(camTr) : Vec3{};
 
     std::vector<PSnap> snap;
     {
@@ -276,33 +356,45 @@ UIView* g_esp_view(void) { return g_esp; }
     int localTeam = -1;
     for (auto& s : snap) if (s.local) localTeam = s.team;
 
+    const float headY = 1.55f;
+
     for (auto& p : snap) {
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
         Vec3 feet = p.pos;
-        Vec3 head = {p.pos.x, p.pos.y + 1.7f, p.pos.z};
+        if (ok_ptr(p.tr)) {
+            Vec3 live = get_pos(p.tr);
+            if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
+        }
+        Vec3 head = {feet.x, feet.y + headY, feet.z};
+
         Vec3 sf = w2s(cam, feet);
         Vec3 sh = w2s(cam, head);
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
-        CGFloat fy = H - sf.y, hy = H - sh.y;
-        CGFloat fx = sf.x, hx = sh.x;
-        if ((fx < -200 && hx < -200) || (fx > W + 200 && hx > W + 200)) continue;
+        CGFloat fx = sf.x - 3.f;
+        CGFloat hx = sh.x - 3.f;
+        CGFloat fy = H - sf.y - 8.f;
+        CGFloat hy = H - sh.y - 8.f;
 
-        CGFloat top = fminf(fy, hy), bot = fmaxf(fy, hy);
+        if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
+
+        CGFloat top = fminf(fy, hy);
+        CGFloat bot = fmaxf(fy, hy);
         CGFloat hgt = bot - top;
-        if (hgt < 8.f) hgt = 50.f;
-        CGFloat mid = (fx + hx) * 0.5f;
-        CGFloat wid = hgt * 0.5f;
+        if (hgt < 10.f) hgt = 36.f;
+        CGFloat mid  = (fx + hx) * 0.5f;
+        CGFloat wid  = hgt * 0.45f;
         CGFloat left = mid - wid * 0.5f;
+        CGFloat corner = fmaxf(6.f, hgt * 0.22f);
 
         UIColor* col = [UIColor colorWithRed:0.15 green:0.55 blue:1 alpha:1];
 
         if (box) {
             CGContextSetStrokeColorWithColor(ctx, col.CGColor);
-            CGContextSetLineWidth(ctx, 1.6);
-            CGContextStrokeRect(ctx, CGRectMake(left, top, wid, hgt));
+            CGContextSetLineWidth(ctx, 1.8);
+            draw_corner(ctx, left, top, wid, hgt, corner);
         }
         if (skel) {
             CGContextSetStrokeColorWithColor(ctx, col.CGColor);
@@ -312,26 +404,58 @@ UIView* g_esp_view(void) { return g_esp; }
             CGContextStrokePath(ctx);
             CGContextFillEllipseInRect(ctx, CGRectMake(hx - 3, hy - 3, 6, 6));
         }
-        if (nameOn || distOn) {
+        if (hpOn) {
+            CGFloat barH = hgt;
+            CGFloat barW = 3.f;
+            CGFloat bx = left - 6.f;
+            CGFloat hp = p.hp >= 0.f ? p.hp : 1.f;
+            CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.45].CGColor);
+            CGContextFillRect(ctx, CGRectMake(bx, top, barW, barH));
+            UIColor* hc = hp > 0.5f ? [UIColor colorWithRed:0.2 green:0.9 blue:0.3 alpha:1]
+                         : hp > 0.25f ? [UIColor colorWithRed:0.95 green:0.75 blue:0.1 alpha:1]
+                         : [UIColor colorWithRed:0.95 green:0.2 blue:0.15 alpha:1];
+            CGContextSetFillColorWithColor(ctx, hc.CGColor);
+            CGFloat fill = barH * hp;
+            CGContextFillRect(ctx, CGRectMake(bx, top + (barH - fill), barW, fill));
+        }
+        if (nameOn || distOn || g_espWeapon.load()) {
             NSMutableString* lab = [NSMutableString stringWithUTF8String:p.name];
             if (distOn) {
-                float d = vdist(p.pos, cpos);
+                float d = vdist(feet, cpos);
                 [lab appendFormat:@" %.0fm", d];
             }
-            [lab drawAtPoint:CGPointMake(left, top - 12)
+            [lab drawAtPoint:CGPointMake(left, top - 13)
               withAttributes:@{
                   NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
-                  NSForegroundColorAttributeName: [UIColor whiteColor]
+                  NSForegroundColorAttributeName: UIColor.whiteColor
               }];
+            if (g_espWeapon.load() && p.weapon[0]) {
+                NSString* wpn = [NSString stringWithFormat:@"%s", p.weapon];
+                if (p.ammo >= 0)
+                    wpn = [NSString stringWithFormat:@"%s [%d]", p.weapon, p.ammo];
+                [wpn drawAtPoint:CGPointMake(left, bot + 2)
+                  withAttributes:@{
+                      NSFontAttributeName: [UIFont systemFontOfSize:10],
+                      NSForegroundColorAttributeName: [UIColor colorWithRed:0.85 green:0.85 blue:0.4 alpha:1]
+                  }];
+            }
+            if (p.armor >= 0) {
+                NSString* ar = [NSString stringWithFormat:@"A:%.0f", p.armor];
+                [ar drawAtPoint:CGPointMake(left + wid + 4, top)
+                  withAttributes:@{
+                      NSFontAttributeName: [UIFont systemFontOfSize:9],
+                      NSForegroundColorAttributeName: [UIColor colorWithRed:0.4 green:0.7 blue:1 alpha:1]
+                  }];
+            }
         }
     }
 }
 @end
 
-void CoreUI_EnsureFOVOverlay(UIWindow* win) {
+void Astral_EnsureFOVOverlay(UIWindow* win) {
     if (!win) return;
     UIView* host = win.rootViewController.view ?: (UIView*)win;
-    UIView* root = CoreUI_SecureRoot ?: host;
+    UIView* root = Astral_SecureRoot ?: host;
     CGRect b = host.bounds;
     if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
@@ -351,44 +475,42 @@ void CoreUI_EnsureFOVOverlay(UIWindow* win) {
     }
 }
 
-static void apply_norecoil(void* localPc) {
-    if (!g_noRecoil.load() || !alive(localPc)) return;
-    // PlayerController → WeaponryController → WeaponController → WeaponParameters (GunParameters)
+// Safe recoil: only 3 float multipliers on WeaponParameters, absolute, once.
+// Never touch nested RecoilParameters* (that crashed).
+static void apply_recoil(void* localPc) {
+    static float lastPct = -999.f;
+    static void* lastP = nullptr;
+    float pct = g_recoilPct.load();
+    if (!ok_ptr(localPc)) return;
+    if (pct < 0.5f) return;
+
     void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
-    if (!alive(wry)) return;
+    if (!ok_ptr(wry)) return;
     void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
-    if (!alive(wc) && unity_base()) {
+    if (!ok_ptr(wc) && unity_base()) {
         using F = void* (*)(void*);
-        wc = R<F>(0x162E58C)(wry); // get_ADFFFAGDHFAHEBE
+        wc = R<F>(0x162E58C)(wry);
     }
-    if (!alive(wc)) return;
+    if (!ok_ptr(wc)) return;
+    void* params = *(void**)((char*)wc + Offsets::WC_weaponParams);
+    if (!ok_ptr(params)) return;
 
-    // WeaponController.WeaponParameters @ 0x68 (GunParameters when gun)
-    void* params = *(void**)((char*)wc + 0x68);
-    if (!alive(params)) return;
+    if (params == lastP && fabsf(pct - lastPct) < 0.5f) return;
+    lastP = params;
+    lastPct = pct;
 
-    auto zf = [](void* b, size_t o) {
-        float* p = (float*)((char*)b + o);
-        if (*p == *p && fabsf(*p) < 500.f) *p = 0.f;
-    };
-    // GunParameters recoil multipliers
-    zf(params, 0xD0); // _recoilMultOnCrouch
-    zf(params, 0xD8); // _recoilAimMult
-    zf(params, 0xE0); // _recoilAimMultOnCrouch
+    float mul = 1.f - pct / 100.f;
+    if (mul < 0.f) mul = 0.f;
+    if (mul > 1.f) mul = 1.f;
 
-    // _recoilControl → max
-    int* rc = (int*)((char*)params + 0xA8);
-    if (*rc >= 0 && *rc < 10000) *rc = 100;
-
-    // RecoilParameters object @ 0xB0 — zero angular ranges + camera deviation
-    void* rp = *(void**)((char*)params + 0xB0);
-    if (alive(rp)) {
-        zf(rp, 0x10); // horizontalRange
-        zf(rp, 0x14); // verticalRange
-        zf(rp, 0x48); // cameraDeviationCoeff
-        zf(rp, 0x50); // recoilAccelDuration
-        zf(rp, 0x54); // recoilAccelStep
-    }
+    @try {
+        float* m1 = (float*)((char*)params + Offsets::GP_recoilMultCrouch);
+        float* m2 = (float*)((char*)params + Offsets::GP_recoilAimMult);
+        float* m3 = (float*)((char*)params + Offsets::GP_recoilAimCrouch);
+        if (*m1 == *m1 && *m1 >= 0.f && *m1 < 20.f) *m1 = mul;
+        if (*m2 == *m2 && *m2 >= 0.f && *m2 < 20.f) *m2 = mul;
+        if (*m3 == *m3 && *m3 >= 0.f && *m3 < 20.f) *m3 = mul;
+    } @catch (...) {}
 }
 
 static void run_aim(void* cam, void* camTr) {
@@ -400,57 +522,75 @@ static void run_aim(void* cam, void* camTr) {
         for (auto& s : snap) if (s.local) localPc = s.obj;
     }
 
-    apply_norecoil(localPc);
+    apply_recoil(localPc);
 
-    if (!g_aimbot.load()) return;
-    if (!alive(cam) || !alive(camTr)) return;
-
-    void* aimTr = camTr;
-    void* aimCtrl = nullptr;
-    if (alive(localPc)) {
-        aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
-        if (alive(aimCtrl)) {
-            void* ct = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
-            if (alive(ct)) aimTr = ct;
-        }
+    if (!g_aimbot.load()) {
+        g_haveSilent = false;
+        return;
     }
+    if (!ok_ptr(cam) || !ok_ptr(camTr) || !ok_ptr(localPc)) return;
+
+    void* aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
+    if (!ok_ptr(aimCtrl)) return;
+
+    void* aimTr = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
+    if (!ok_ptr(aimTr)) aimTr = camTr;
 
     CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
     float cx = scr.width * 0.5f, cy = scr.height * 0.5f;
-    float fovR = fminf(scr.width, scr.height) * 0.45f;
-    if (g_fovDraw.load())
-        fovR = fminf(scr.width, scr.height) * (0.05f + g_fov.load() / 30.f * 0.25f);
+    float side = fminf(scr.width, scr.height);
+    float fovR = side * (0.05f + g_fov.load() / 30.f * 0.25f);
 
-    Vec3 best{};
-    bool have = false;
-    float bestScore = 1e9f;
     Vec3 cpos = get_pos(aimTr);
     int localTeam = -1;
     for (auto& s : snap) if (s.local) localTeam = s.team;
 
-    // bone height: 0 head 1 neck 2 chest
-    float boneY = 1.65f;
+    float boneY = 1.55f;
     switch (g_bone.load()) {
-        case 1: boneY = 1.45f; break;
-        case 2: boneY = 1.15f; break;
-        default: boneY = 1.65f; break;
+        case 1: boneY = 1.35f; break;
+        case 2: boneY = 1.05f; break;
+        default: boneY = 1.55f; break;
     }
+
+    Vec3 best{};
+    bool have = false;
+    float bestScore = 1e9f;
 
     for (auto& p : snap) {
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
-        Vec3 bone = {p.pos.x, p.pos.y + boneY, p.pos.z};
+
+        Vec3 base = p.pos;
+        if (ok_ptr(p.tr)) {
+            Vec3 live = get_pos(p.tr);
+            if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
+        }
+        Vec3 bone = {base.x, base.y + boneY, base.z};
+
+        // prefer visible targets
+        if (!is_visible(cpos, bone)) continue;
+
         Vec3 sc = w2s(cam, bone);
-        if (sc.z < 0.02f) continue;
-        float sx = sc.x, sy = scr.height - sc.y;
+        if (sc.z < 0.05f) continue;
+        float sx = sc.x - 3.f;
+        float sy = (scr.height - sc.y) - 8.f;
         float dx = sx - cx, dy = sy - cy;
-        float d2 = sqrtf(dx * dx + dy * dy);
+        float d2 = sqrtf(dx*dx + dy*dy);
         if (d2 > fovR) continue;
         if (d2 < bestScore) { bestScore = d2; best = bone; have = true; }
     }
-    if (!have) return;
+    if (!have) {
+        g_haveSilent = false;
+        return;
+    }
+
+    g_silentTarget = best;
+    g_haveSilent = true;
 
     float sm = fmaxf(1.f, g_smooth.load());
+    // silent: instantaneous angle write (game fires along aim angles) — no LookAt
+    if (g_silent.load()) sm = 1.f;
+
     static Vec3 smT{};
     static bool ini = false;
     if (!ini) { smT = best; ini = true; }
@@ -459,25 +599,26 @@ static void run_aim(void* cam, void* camTr) {
     smT.z += (best.z - smT.z) / sm;
 
     Vec3 dir = vnorm(vsub(smT, cpos));
-    float yaw = atan2f(dir.x, dir.z) * 57.2957795f;
+    float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
     float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
+    if (pitch < -85.f) pitch = -85.f;
+    if (pitch >  85.f) pitch =  85.f;
 
-    look_at(aimTr, smT);
-    set_rot(aimTr, quat_from_dir(dir));
-
-    if (alive(aimCtrl)) {
-        float* a0 = (float*)((char*)aimCtrl + 0x164);
-        float* a1 = (float*)((char*)aimCtrl + 0x168);
-        if (*a0 == *a0 && fabsf(*a0) < 360.f) *a0 = pitch;
-        if (*a1 == *a1 && fabsf(*a1) < 360.f) *a1 = yaw;
-    }
-    if (aimTr != camTr) {
-        look_at(camTr, smT);
-        set_rot(camTr, quat_from_dir(dir));
+    // ONLY angle fields — never LookAt (LookAt was making ESP float)
+    float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
+    float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
+    float curP = *aPitch, curY = *aYaw;
+    if (curP == curP && fabsf(curP) < 360.f)
+        *aPitch = g_silent.load() ? pitch : (curP + (pitch - curP) / sm);
+    if (curY == curY && fabsf(curY) < 500.f) {
+        float dy = yaw - curY;
+        while (dy >  180.f) dy -= 360.f;
+        while (dy < -180.f) dy += 360.f;
+        *aYaw = g_silent.load() ? yaw : (curY + dy / sm);
     }
 }
 
-void CoreUI_FeaturesTick() {
+void Astral_FeaturesTick() {
     if (g_esp) {
         UIView* root = g_esp.superview;
         if (root) {
@@ -489,27 +630,28 @@ void CoreUI_FeaturesTick() {
         [g_esp setNeedsDisplay];
     }
 
-    bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load();
-    bool wantAim = g_aimbot.load() || g_noRecoil.load();
+    bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load() || g_espHP.load() || g_espWeapon.load();
+    bool wantAim = g_aimbot.load();
+    bool wantRec = g_recoilPct.load() > 0.5f;
     bool wantFov = g_fovDraw.load();
-    if (!wantEsp && !wantAim && !wantFov) return;
+    if (!wantEsp && !wantAim && !wantRec && !wantFov) return;
     if (!unity_base()) return;
 
     void* cam = main_cam();
-    if (!alive(cam)) return;
+    if (!ok_ptr(cam)) return;
     void* camTr = get_tr(cam);
-    if (!alive(camTr)) return;
+    if (!ok_ptr(camTr)) return;
 
-    if (wantEsp || wantAim) {
+    if (wantEsp || wantAim || wantRec) {
         size_t n = 0;
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             n = g_list.size();
         }
-        if (n == 0 || ++g_ctr >= 10) {
+        if (n == 0 || ++g_ctr >= 3) {
             g_ctr = 0;
             refresh(camTr);
         }
     }
-    if (wantAim) run_aim(cam, camTr);
+    if (wantAim || wantRec) run_aim(cam, camTr);
 }
