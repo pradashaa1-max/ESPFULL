@@ -490,6 +490,8 @@ static void rebuildContent() {
                        g_menuOpen.load(), ^(bool v){
                            g_menuOpen=v;
                            g_panel.hidden = !v;
+                           g_panel.alpha = v ? 1.0 : 0.0;
+                           if (g_fab) g_fab.alpha = v ? 0.75 : 0.0;
                        }));
     }
 
@@ -605,7 +607,7 @@ static void buildPanel(UIView* host) {
     [UIView animateWithDuration:0.22 animations:^{
         panel.alpha = open ? 1.0 : 0.0;
         panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.94, 0.94);
-        if (fab) fab.alpha = open ? 0.85 : 0.28; // fade handle when closed
+        if (fab) fab.alpha = open ? 0.75 : 0.0; // fully gone when closed
     } completion:^(BOOL f) {
         if (!open) panel.hidden = YES;
     }];
@@ -623,7 +625,7 @@ static void buildFab(UIView* host) {
     g_fab.layer.borderWidth = 1.0;
     g_fab.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
     g_fab.layer.shadowOpacity = 0;
-    g_fab.alpha = 0.35; // dim by default
+    g_fab.alpha = 0.0;  // fully hidden until menu open
     g_fab.userInteractionEnabled = YES;
     UIButton* btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = g_fab.bounds;
