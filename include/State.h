@@ -14,7 +14,7 @@ extern std::atomic<bool>  g_espWeapon;
 extern std::atomic<bool>  g_espDist;
 extern std::atomic<bool>  g_espTeam;
 extern std::atomic<bool>  g_noRecoil;
-extern std::atomic<bool>  g_hideRec;      // stream/screenshot hide — ON by default
+extern std::atomic<bool>  g_hideRec;      // stream/screenshot hide — OFF by default (avoids permanent home indicator)
 extern std::atomic<bool>  g_menuOpen;
 extern std::atomic<float> g_fov;          // 1..30
 extern std::atomic<float> g_smooth;       // 1..15
