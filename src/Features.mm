@@ -1,4 +1,4 @@
-// Features.mm — corner ESP, visible, FOV aim, silent (angles only), no SO recoil
+// Features.mm — ESP/aim/world (stealth)
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
@@ -12,7 +12,7 @@
 #include <vector>
 #include <mutex>
 
-extern UIView* Astral_SecureRoot;
+extern UIView* CoreUI_SecureRoot;
 
 struct Vec3 { float x, y, z; };
 struct RayHit {
@@ -492,8 +492,9 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
+        // Use snapshot pos while aimbot runs — live get_pos jitters with LookAt
         Vec3 feet = p.pos;
-        if (ok_ptr(p.tr)) {
+        if (!g_aimbot.load() && ok_ptr(p.tr)) {
             Vec3 live = get_pos(p.tr);
             if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
         }
@@ -519,17 +520,45 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat left = mid - wid * 0.5f;
         CGFloat corner = fmaxf(6.f, hgt * 0.22f);
 
-        UIColor* col = [UIColor colorWithRed:0.15 green:0.55 blue:1 alpha:1];
+        // Clean green box / cyan skeleton (reference style)
+        UIColor* boxCol = [UIColor colorWithRed:0.15 green:0.95 blue:0.35 alpha:0.95];
+        UIColor* skelCol = [UIColor colorWithRed:0.25 green:0.85 blue:1.0 alpha:0.95];
 
         if (box) {
-            CGContextSetStrokeColorWithColor(ctx, col.CGColor);
-            CGContextSetLineWidth(ctx, 1.8);
-            draw_corner(ctx, left, top, wid, hgt, corner);
+            CGContextSetStrokeColorWithColor(ctx, boxCol.CGColor);
+            CGContextSetLineWidth(ctx, 2.0);
+            CGContextStrokeRect(ctx, CGRectMake(left, top, wid, hgt));
+            // soft fill
+            CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:0.15 green:0.95 blue:0.35 alpha:0.06].CGColor);
+            CGContextFillRect(ctx, CGRectMake(left, top, wid, hgt));
         }
         if (skel) {
-            // head marker only — no vertical line through box
-            CGContextSetFillColorWithColor(ctx, col.CGColor);
-            CGContextFillEllipseInRect(ctx, CGRectMake(hx - 3, hy - 3, 6, 6));
+            // estimated stick figure from head/feet (no bone dump needed)
+            CGFloat mx = (left + left + wid) * 0.5f;
+            CGFloat neckY = hy + hgt * 0.08f;
+            CGFloat chestY = hy + hgt * 0.22f;
+            CGFloat hipY = hy + hgt * 0.48f;
+            CGFloat kneeY = hy + hgt * 0.72f;
+            CGFloat shW = wid * 0.28f;
+            CGFloat hipW = wid * 0.18f;
+            CGContextSetStrokeColorWithColor(ctx, skelCol.CGColor);
+            CGContextSetLineWidth(ctx, 1.6);
+            CGContextSetLineCap(ctx, kCGLineCapRound);
+            auto line = [&](CGFloat x1, CGFloat y1, CGFloat x2, CGFloat y2) {
+                CGContextMoveToPoint(ctx, x1, y1);
+                CGContextAddLineToPoint(ctx, x2, y2);
+                CGContextStrokePath(ctx);
+            };
+            // head
+            CGContextSetFillColorWithColor(ctx, skelCol.CGColor);
+            CGContextFillEllipseInRect(ctx, CGRectMake(hx - 4, hy - 4, 8, 8));
+            line(mx, hy + 4, mx, neckY);
+            line(mx - shW, chestY, mx + shW, chestY); // shoulders
+            line(mx, neckY, mx, hipY); // spine
+            line(mx - shW, chestY, mx - shW * 1.1f, chestY + hgt * 0.25f); // L arm
+            line(mx + shW, chestY, mx + shW * 1.1f, chestY + hgt * 0.25f); // R arm
+            line(mx, hipY, mx - hipW, kneeY); line(mx - hipW, kneeY, mx - hipW, fy); // L leg
+            line(mx, hipY, mx + hipW, kneeY); line(mx + hipW, kneeY, mx + hipW, fy); // R leg
         }
         if (hpOn && p.hp >= 0.f) {
             CGFloat barH = hgt;
@@ -551,11 +580,19 @@ UIView* g_esp_view(void) { return g_esp; }
                 float d = vdist(feet, cpos);
                 [lab appendFormat:@" %.0fm", d];
             }
-            [lab drawAtPoint:CGPointMake(left, top - 13)
-              withAttributes:@{
-                  NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
-                  NSForegroundColorAttributeName: UIColor.whiteColor
-              }];
+            {
+                NSDictionary* attrs = @{
+                    NSFontAttributeName: [UIFont boldSystemFontOfSize:10],
+                    NSForegroundColorAttributeName: UIColor.whiteColor
+                };
+                CGSize sz = [lab sizeWithAttributes:attrs];
+                CGFloat px = mid - (sz.width + 12) * 0.5f;
+                CGFloat py = top - 18;
+                UIBezierPath* pill = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(px, py, sz.width + 12, 15) cornerRadius:4];
+                [[UIColor colorWithRed:0.45 green:0.1 blue:0.75 alpha:0.92] setFill];
+                [pill fill];
+                [lab drawAtPoint:CGPointMake(px + 6, py + 1) withAttributes:attrs];
+            }
             if (g_espWeapon.load() && (p.weapon[0] || p.ammo >= 0)) {
                 NSString* wpn;
                 if (p.weapon[0] && p.ammo >= 0 && p.ammoMax > 0)
@@ -602,26 +639,51 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat x = sc.x - 3.f;
         CGFloat y = H - sc.y - 3.f;
         if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
+        // classify: bomb / smoke / molly / other nade
+        BOOL isSmoke = NO, isMolly = NO;
+        if (!isBomb) {
+            const char* L = w.label;
+            if (strcasestr(L, "smoke") || strcasestr(L, "Smoke")) isSmoke = YES;
+            else if (strcasestr(L, "molot") || strcasestr(L, "incendi") || strcasestr(L, "fire")
+                  || strcasestr(L, "Molly") || strcasestr(L, "Molotov")) isMolly = YES;
+        }
         UIColor* col = isBomb
-            ? [UIColor colorWithRed:1 green:0.35 blue:0.1 alpha:1]
-            : [UIColor colorWithRed:1 green:0.85 blue:0.2 alpha:1];
+            ? [UIColor colorWithRed:1 green:0.25 blue:0.1 alpha:1]
+            : isSmoke ? [UIColor colorWithRed:0.75 green:0.75 blue:0.8 alpha:1]
+            : isMolly ? [UIColor colorWithRed:1 green:0.45 blue:0.05 alpha:1]
+            : [UIColor colorWithRed:1 green:0.85 blue:0.15 alpha:1];
         CGContextSetFillColorWithColor(ctx, col.CGColor);
-        CGContextFillEllipseInRect(ctx, CGRectMake(x - 5, y - 5, 10, 10));
-        NSString* lab = [NSString stringWithUTF8String:w.label];
-        [lab drawAtPoint:CGPointMake(x + 8, y - 8)
-          withAttributes:@{
-              NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
-              NSForegroundColorAttributeName: col
-          }];
+        CGContextFillEllipseInRect(ctx, CGRectMake(x - 6, y - 6, 12, 12));
+        // label + timer
+        NSString* lab;
+        if (w.timer >= 0.f) {
+            if (isBomb) lab = [NSString stringWithFormat:@"BOMB %.1fs", w.timer];
+            else if (isSmoke) lab = [NSString stringWithFormat:@"SMOKE %.1fs", w.timer];
+            else if (isMolly) lab = [NSString stringWithFormat:@"MOLLY %.1fs", w.timer];
+            else lab = [NSString stringWithFormat:@"%s %.1fs", w.label, w.timer];
+        } else {
+            if (isBomb) lab = @"BOMB";
+            else if (isSmoke) lab = @"SMOKE";
+            else if (isMolly) lab = @"MOLLY";
+            else lab = [NSString stringWithUTF8String:w.label];
+        }
+        NSDictionary* attrs = @{
+            NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
+            NSForegroundColorAttributeName: col
+        };
+        CGSize sz = [lab sizeWithAttributes:attrs];
+        CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.55].CGColor);
+        CGContextFillRect(ctx, CGRectMake(x + 8, y - 10, sz.width + 6, 14));
+        [lab drawAtPoint:CGPointMake(x + 11, y - 9) withAttributes:attrs];
     }
     } // bomb/grenade toggles
 }
 @end
 
-void Astral_EnsureFOVOverlay(UIWindow* win) {
+void CoreUI_EnsureFOVOverlay(UIWindow* win) {
     if (!win) return;
     UIView* host = win.rootViewController.view ?: (UIView*)win;
-    UIView* root = Astral_SecureRoot ?: host;
+    UIView* root = CoreUI_SecureRoot ?: host;
     CGRect b = host.bounds;
     if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
@@ -819,7 +881,7 @@ static void run_aim(void* cam, void* camTr) {
     }
 }
 
-void Astral_FeaturesTick() {
+void CoreUI_FeaturesTick() {
     @try {
         if (g_esp) {
             UIView* root = g_esp.superview;
