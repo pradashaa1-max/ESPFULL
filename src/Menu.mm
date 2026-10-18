@@ -8,9 +8,9 @@
 #include <cstdint>
 
 void CoreUI_RebuildMenu(void);
-
-extern void CoreUI_FeaturesTick();
-extern void CoreUI_EnsureFOVOverlay(UIWindow* win);
+void CoreUI_FeaturesTick(void);
+void CoreUI_EnsureFOVOverlay(UIWindow* win);
+static void onCaptureChanged(void);
 
 UIView* CoreUI_SecureRoot = nil;
 
@@ -26,7 +26,7 @@ std::atomic<bool>  g_espWeapon{false};
 std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
-std::atomic<bool>  g_hideRec{true};       // ON at launch
+std::atomic<bool>  g_hideRec{true};       // ON — hide while screen is being captured
 std::atomic<bool>  g_menuOpen{false};
 std::atomic<float> g_fov{15.f};
 std::atomic<float> g_smooth{4.5f};
@@ -48,7 +48,7 @@ void CoreUI_SaveConfig(void) {
     [d setBool:g_espDist.load()  forKey:@"cui_espDist"];
     [d setBool:g_espTeam.load()  forKey:@"cui_espTeam"];
     [d setBool:g_noRecoil.load() forKey:@"cui_noRecoil"];
-    [d setBool:g_hideRec.load()  forKey:@"cui_hideRec"];
+    [d setBool:g_hideRec.load()  forKey:@"cui_privMode"];
     [d setFloat:g_fov.load()     forKey:@"cui_fov"];
     [d setFloat:g_smooth.load()  forKey:@"cui_smooth"];
     [d setInteger:g_bone.load()  forKey:@"cui_bone"];
@@ -59,7 +59,7 @@ void CoreUI_SaveConfig(void) {
 
 void CoreUI_LoadConfig(void) {
     NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
-    if (![d objectForKey:@"cui_hideRec"]) return; // first launch — keep defaults
+    if (![d objectForKey:@"cui_privMode"]) return; // first launch — keep defaults
     g_aimbot.store([d boolForKey:@"cui_aimbot"]);
     g_silent.store([d boolForKey:@"cui_silent"]);
     g_fovDraw.store([d boolForKey:@"cui_fovDraw"]);
@@ -71,7 +71,7 @@ void CoreUI_LoadConfig(void) {
     g_espDist.store([d boolForKey:@"cui_espDist"]);
     g_espTeam.store([d boolForKey:@"cui_espTeam"]);
     g_noRecoil.store([d boolForKey:@"cui_noRecoil"]);
-    g_hideRec.store([d boolForKey:@"cui_hideRec"]);
+    g_hideRec.store([d boolForKey:@"cui_privMode"]);
     float f = [d floatForKey:@"cui_fov"];
     if (f > 0.5f && f < 40.f) g_fov.store(f);
     float sm = [d floatForKey:@"cui_smooth"];
@@ -209,85 +209,66 @@ static int           g_section = 0;
 static NSArray<UIButton*>* g_tabBtns = nil;
 
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
-static void applyHideRec(UIView* root) {
-    // Overlay root only. Everything (ESP + FAB + panel) goes inside secure
-    // so screen recording / screenshots show black where the cheat UI is.
-    if (!root) return;
-    BOOL on = g_hideRec.load();
-
-    if (on) {
-        if (!g_secureField) {
-            g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
-            g_secureField.secureTextEntry = YES;
-            g_secureField.backgroundColor = UIColor.clearColor;
-            g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        }
-        g_secureField.frame = root.bounds;
-        // YES so children (menu/fab) can receive touches; ACW.pointInside still
-        // filters to panel/fab only so Google/game are fine.
-        g_secureField.userInteractionEnabled = YES;
-        if (g_secureField.superview != root)
-            [root insertSubview:g_secureField atIndex:0];
-
-        [g_secureField layoutIfNeeded];
-        UIView* container = nil;
-        for (UIView* s in g_secureField.subviews) {
-            if (s.bounds.size.width >= root.bounds.size.width * 0.9) {
-                container = s; break;
-            }
-        }
-        if (!container) {
-            container = [[UIView alloc] initWithFrame:root.bounds];
-            container.backgroundColor = UIColor.clearColor;
-            container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [g_secureField addSubview:container];
-        }
-        container.frame = root.bounds;
-        container.userInteractionEnabled = YES;
-        CoreUI_SecureRoot = container;
-
-        // Move panel + FAB + ESP into secure container → hidden on recording
-        if (g_panel && g_panel.superview != container) {
-            [g_panel removeFromSuperview];
-            [container addSubview:g_panel];
-        }
-        if (g_fab && g_fab.superview != container) {
-            [g_fab removeFromSuperview];
-            [container addSubview:g_fab];
-        }
-        extern UIView* g_esp_view(void);
-        UIView* esp = g_esp_view();
-        if (esp && esp.superview != container) {
-            [esp removeFromSuperview];
-            [container insertSubview:esp atIndex:0];
-        }
-    } else {
-        CoreUI_SecureRoot = nil;
-        // Move chrome back to overlay root
-        if (g_panel && g_panel.superview != root) {
-            [g_panel removeFromSuperview];
-            [root addSubview:g_panel];
-        }
-        if (g_fab && g_fab.superview != root) {
-            [g_fab removeFromSuperview];
-            [root addSubview:g_fab];
-        }
-        extern UIView* g_esp_view(void);
-        UIView* esp = g_esp_view();
-        if (esp && esp.superview != root) {
-            [esp removeFromSuperview];
-            [root insertSubview:esp atIndex:0];
-        }
-        if (g_secureField) {
-            [g_secureField removeFromSuperview];
-            g_secureField = nil;
+// ─── Hide while screen is captured (no secure UITextField → home indicator can fade)
+static void setCheatChromeHidden(BOOL hidden) {
+    extern UIView* g_esp_view(void);
+    UIView* esp = g_esp_view();
+    if (esp) esp.hidden = hidden;
+    if (g_panel) {
+        if (hidden) {
+            g_panel.hidden = YES;
+            g_panel.alpha = 0;
+        } else {
+            // restore only if menu should be open
+            bool open = g_menuOpen.load();
+            g_panel.hidden = !open;
+            g_panel.alpha = open ? 1.0 : 0.0;
         }
     }
-    if (g_panel) [g_panel.superview bringSubviewToFront:g_panel];
-    if (g_fab)   [g_fab.superview bringSubviewToFront:g_fab];
-    CoreUI_EnsureFOVOverlay(g_hostWin);
+    if (g_fab) {
+        if (hidden) {
+            g_fab.alpha = 0.0;
+        } else {
+            g_fab.alpha = g_menuOpen.load() ? 0.90 : 0.40;
+            g_fab.hidden = NO;
+        }
+    }
 }
 
+static void onCaptureChanged(void) {
+    if (!g_hideRec.load()) {
+        setCheatChromeHidden(NO);
+        return;
+    }
+    BOOL captured = NO;
+    if (@available(iOS 11.0, *)) {
+        captured = UIScreen.mainScreen.isCaptured;
+    }
+    setCheatChromeHidden(captured);
+}
+
+static void applyHideRec(UIView* root) {
+    (void)root;
+    // one-time observer
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if (@available(iOS 11.0, *)) {
+            [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenCapturedDidChangeNotification
+                                                            object:nil
+                                                             queue:NSOperationQueue.mainQueue
+                                                        usingBlock:^(__unused NSNotification* n) {
+                onCaptureChanged();
+            }];
+        }
+    });
+    // no full-screen secure UITextField — that was keeping the home indicator lit
+    if (g_secureField) {
+        [g_secureField removeFromSuperview];
+        g_secureField = nil;
+    }
+    CoreUI_SecureRoot = nil;
+    onCaptureChanged();
+}
 
 static UIView* makeSwitch(NSString* title, NSString* sub, bool on, void(^cb)(bool)) {
     UIView* row = [[UIView alloc] initWithFrame:CGRectMake(0,0,300,54)];
@@ -491,7 +472,7 @@ static void rebuildContent() {
                            g_menuOpen=v;
                            g_panel.hidden = !v;
                            g_panel.alpha = v ? 1.0 : 0.0;
-                           if (g_fab) g_fab.alpha = v ? 0.75 : 0.0;
+                           if (g_fab) g_fab.alpha = v ? 0.90 : 0.40;
                        }));
     }
 
@@ -607,7 +588,7 @@ static void buildPanel(UIView* host) {
     [UIView animateWithDuration:0.22 animations:^{
         panel.alpha = open ? 1.0 : 0.0;
         panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.94, 0.94);
-        if (fab) fab.alpha = open ? 0.75 : 0.0; // fully gone when closed
+        if (fab) fab.alpha = open ? 0.90 : 0.40; // dim when closed, bright when open
     } completion:^(BOOL f) {
         if (!open) panel.hidden = YES;
     }];
@@ -616,16 +597,17 @@ static void buildPanel(UIView* host) {
 
 static void buildFab(UIView* host) {
     if (g_fab) return;
-    // Small low-alpha handle — does not glow when menu closed
-    CGFloat x = MAX(16, host.bounds.size.width - 54);
-    if (x < 20) x = 20;
-    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 36, 36, 36)];
-    g_fab.backgroundColor = [UIColor colorWithWhite:1 alpha:0.18];
-    g_fab.layer.cornerRadius = 18;
-    g_fab.layer.borderWidth = 1.0;
-    g_fab.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
+    // Tiny dim handle top-right — visible enough to find, no glow
+    CGFloat x = MAX(12, host.bounds.size.width - 44);
+    if (x < 12) x = 12;
+    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 28, 28, 28)];
+    g_fab.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+    g_fab.layer.cornerRadius = 14;
+    g_fab.layer.borderWidth = 0.5;
+    g_fab.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.20].CGColor;
     g_fab.layer.shadowOpacity = 0;
-    g_fab.alpha = 0.0;  // fully hidden until menu open
+    g_fab.layer.shadowRadius = 0;
+    g_fab.alpha = 0.40; // closed: dim but findable
     g_fab.userInteractionEnabled = YES;
     UIButton* btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = g_fab.bounds;
@@ -725,37 +707,11 @@ static void buildFab(UIView* host) {
     }
     if (g_hostWin) {
         UIView* root = g_hostWin.rootViewController.view;
-        // keep secure full-size — interaction MUST stay YES so panel/fab receive touches
-        if (g_secureField) {
-            g_secureField.frame = root.bounds;
-            g_secureField.userInteractionEnabled = YES;
-            if (CoreUI_SecureRoot) {
-                CoreUI_SecureRoot.frame = root.bounds;
-                CoreUI_SecureRoot.userInteractionEnabled = YES;
-            }
-        }
-        // re-home ESP into secure container every tick when hide is on
-        if (g_hideRec.load() && CoreUI_SecureRoot) {
-            extern UIView* g_esp_view(void);
-            UIView* esp = g_esp_view();
-            if (esp && esp.superview != CoreUI_SecureRoot) {
-                [esp removeFromSuperview];
-                [CoreUI_SecureRoot insertSubview:esp atIndex:0];
-            }
-            if (g_panel && g_panel.superview != CoreUI_SecureRoot) {
-                [g_panel removeFromSuperview];
-                [CoreUI_SecureRoot addSubview:g_panel];
-            }
-            if (g_fab && g_fab.superview != CoreUI_SecureRoot) {
-                [g_fab removeFromSuperview];
-                [CoreUI_SecureRoot addSubview:g_fab];
-            }
-        }
         CoreUI_EnsureFOVOverlay(g_hostWin);
-        UIView* front = CoreUI_SecureRoot ?: root;
-        if (g_panel) [front bringSubviewToFront:g_panel];
-        if (g_fab)   [front bringSubviewToFront:g_fab];
+        if (g_panel) [root bringSubviewToFront:g_panel];
+        if (g_fab)   [root bringSubviewToFront:g_fab];
     }
+    onCaptureChanged();
     CoreUI_FeaturesTick();
 }
 
