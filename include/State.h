@@ -28,8 +28,8 @@ extern std::atomic<uint32_t> g_menuColor;
 
 #ifdef __OBJC__
 @class UIView;
-extern UIView* Astral_SecureRoot;
+extern UIView* CoreUI_SecureRoot;
 #endif
 
-void Astral_SaveConfig(void);
-void Astral_LoadConfig(void);
+void CoreUI_SaveConfig(void);
+void CoreUI_LoadConfig(void);
