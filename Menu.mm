@@ -1,4 +1,4 @@
-// Menu.mm — Astral UI, smooth, RU/EN, colors, stream-hide ON by default
+// Menu.mm — CoreUI stealth (from AstralCheat_fixed 20)
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -7,25 +7,29 @@
 #include <atomic>
 #include <cstdint>
 
-void Astral_RebuildMenu(void);
+void CoreUI_RebuildMenu(void);
 
-extern void Astral_FeaturesTick();
-extern void Astral_EnsureFOVOverlay(UIWindow* win);
+extern void CoreUI_FeaturesTick();
+extern void CoreUI_EnsureFOVOverlay(UIWindow* win);
 
-UIView* Astral_SecureRoot = nil;
+UIView* CoreUI_SecureRoot = nil;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 std::atomic<bool>  g_aimbot{false};
 std::atomic<bool>  g_silent{false};
-std::atomic<bool>  g_fovDraw{true};
-std::atomic<bool>  g_espBox{true};
-std::atomic<bool>  g_espSkel{true};
-std::atomic<bool>  g_espName{true};
-std::atomic<bool>  g_espHP{true};
-std::atomic<bool>  g_espWeapon{true};
+std::atomic<bool>  g_aimVisible{true};
+std::atomic<bool>  g_fovDraw{false};
+std::atomic<bool>  g_espBox{false};
+std::atomic<bool>  g_espSkel{false};
+std::atomic<bool>  g_espName{false};
+std::atomic<bool>  g_espHP{false};
+std::atomic<bool>  g_espWeapon{false};
+std::atomic<bool>  g_espBomb{true};
+std::atomic<bool>  g_espGrenade{true};
 std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
+std::atomic<float> g_recoilPct{0.f};      // 0=full, 100=zero
 std::atomic<bool>  g_hideRec{true};       // ON at launch
 std::atomic<bool>  g_menuOpen{false};
 std::atomic<float> g_fov{15.f};
@@ -33,6 +37,64 @@ std::atomic<float> g_smooth{4.5f};
 std::atomic<int>   g_bone{0};
 std::atomic<int>   g_lang{0};             // 0 EN 1 RU
 std::atomic<uint32_t> g_menuColor{0xFF1E90FF};
+
+// ─── Config persist (NSUserDefaults) ─────────────────────────────────────────
+void CoreUI_SaveConfig(void) {
+    NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
+    [d setBool:g_aimbot.load()   forKey:@"cui_aimbot"];
+    [d setBool:g_silent.load()   forKey:@"cui_silent"];
+    [d setBool:g_aimVisible.load()forKey:@"cui_aimVisible"];
+    [d setBool:g_fovDraw.load()  forKey:@"cui_fovDraw"];
+    [d setBool:g_espBox.load()   forKey:@"cui_espBox"];
+    [d setBool:g_espSkel.load()  forKey:@"cui_espSkel"];
+    [d setBool:g_espName.load()  forKey:@"cui_espName"];
+    [d setBool:g_espHP.load()    forKey:@"cui_espHP"];
+    [d setBool:g_espWeapon.load()forKey:@"cui_espWeapon"];
+    [d setBool:g_espBomb.load()   forKey:@"cui_espBomb"];
+    [d setBool:g_espGrenade.load()forKey:@"cui_espGrenade"];
+    [d setBool:g_espDist.load()  forKey:@"cui_espDist"];
+    [d setBool:g_espTeam.load()  forKey:@"cui_espTeam"];
+    [d setBool:g_noRecoil.load() forKey:@"cui_noRecoil"];
+    [d setFloat:g_recoilPct.load() forKey:@"cui_recoilPct"];
+    [d setBool:g_hideRec.load()  forKey:@"cui_hideRec"];
+    [d setFloat:g_fov.load()     forKey:@"cui_fov"];
+    [d setFloat:g_smooth.load()  forKey:@"cui_smooth"];
+    [d setInteger:g_bone.load()  forKey:@"cui_bone"];
+    [d setInteger:g_lang.load()  forKey:@"cui_lang"];
+    [d setInteger:(NSInteger)g_menuColor.load() forKey:@"cui_menuColor"];
+    [d synchronize];
+}
+
+void CoreUI_LoadConfig(void) {
+    NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
+    if (![d objectForKey:@"cui_hideRec"]) return; // first launch — keep defaults
+    g_aimbot.store([d boolForKey:@"cui_aimbot"]);
+    g_silent.store([d boolForKey:@"cui_silent"]);
+    if ([d objectForKey:@"cui_aimVisible"]) g_aimVisible.store([d boolForKey:@"cui_aimVisible"]);
+    g_fovDraw.store([d boolForKey:@"cui_fovDraw"]);
+    g_espBox.store([d boolForKey:@"cui_espBox"]);
+    g_espSkel.store([d boolForKey:@"cui_espSkel"]);
+    g_espName.store([d boolForKey:@"cui_espName"]);
+    g_espHP.store([d boolForKey:@"cui_espHP"]);
+    g_espWeapon.store([d boolForKey:@"cui_espWeapon"]);
+    g_espBomb.store([d boolForKey:@"cui_espBomb"]);
+    g_espGrenade.store([d boolForKey:@"cui_espGrenade"]);
+    g_espDist.store([d boolForKey:@"cui_espDist"]);
+    g_espTeam.store([d boolForKey:@"cui_espTeam"]);
+    g_noRecoil.store([d boolForKey:@"cui_noRecoil"]);
+    float rp = [d floatForKey:@"cui_recoilPct"];
+    if (rp >= 0.f && rp <= 100.f) g_recoilPct.store(rp);
+    else if (g_noRecoil.load()) g_recoilPct.store(100.f);
+    g_hideRec.store([d boolForKey:@"cui_hideRec"]);
+    float f = [d floatForKey:@"cui_fov"];
+    if (f > 0.5f && f < 40.f) g_fov.store(f);
+    float sm = [d floatForKey:@"cui_smooth"];
+    if (sm >= 1.f && sm <= 20.f) g_smooth.store(sm);
+    g_bone.store((int)[d integerForKey:@"cui_bone"]);
+    g_lang.store((int)[d integerForKey:@"cui_lang"]);
+    NSInteger col = [d integerForKey:@"cui_menuColor"];
+    if (col != 0) g_menuColor.store((uint32_t)col);
+}
 
 // ─── Locale ──────────────────────────────────────────────────────────────────
 static NSString* L(const char* en, const char* ru) {
@@ -54,10 +116,10 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 // ─── Window that never steals game touches ───────────────────────────────────
 
 // ── Drag ─────────────────────────────────────────────────────────────────────
-@interface AstralDrag : NSObject
+@interface CoreUIDrag : NSObject
 + (void)attach:(UIView*)v;
 @end
-@implementation AstralDrag
+@implementation CoreUIDrag
 + (void)attach:(UIView*)v {
     if (!v) return;
     for (UIGestureRecognizer* g in v.gestureRecognizers) {
@@ -88,17 +150,28 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 
 @interface ACW : UIWindow @end
 @implementation ACW
-// If touch is NOT on panel/FAB — window is invisible to the system (Google + game work).
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        if (@available(iOS 13.0, *))
+            self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        self.backgroundColor = UIColor.clearColor;
+    }
+    return self;
+}
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
     extern UIView* g_panel_ref(void);
     extern UIView* g_fab_ref(void);
     UIView* panel = g_panel_ref();
     UIView* fab = g_fab_ref();
+    CGFloat H = self.bounds.size.height;
+    if (point.y > H - 36.f) return NO;
+    if (point.y < 10.f) return NO;
     if (panel && !panel.hidden && panel.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:panel];
         if (CGRectContainsPoint(panel.bounds, lp)) return YES;
     }
-    if (fab && !fab.hidden) {
+    if (fab && !fab.hidden && fab.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:fab];
         if (CGRectContainsPoint(fab.bounds, lp)) return YES;
     }
@@ -106,7 +179,25 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 }
 - (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
     if (![self pointInside:point withEvent:event]) return nil;
-    return [super hitTest:point withEvent:event];
+    extern UIView* g_panel_ref(void);
+    extern UIView* g_fab_ref(void);
+    UIView* panel = g_panel_ref();
+    UIView* fab = g_fab_ref();
+    if (fab && !fab.hidden) {
+        CGPoint lp = [self convertPoint:point toView:fab];
+        if (CGRectContainsPoint(fab.bounds, lp)) {
+            UIView* h = [fab hitTest:lp withEvent:event];
+            return h ?: fab;
+        }
+    }
+    if (panel && !panel.hidden && panel.alpha > 0.05f) {
+        CGPoint lp = [self convertPoint:point toView:panel];
+        if (CGRectContainsPoint(panel.bounds, lp)) {
+            UIView* h = [panel hitTest:lp withEvent:event];
+            return h ?: panel;
+        }
+    }
+    return nil;
 }
 - (BOOL)canBecomeKeyWindow { return NO; }
 - (BOOL)canBecomeFirstResponder { return NO; }
@@ -117,9 +208,14 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 - (BOOL)shouldAutorotate { return YES; }
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation { return UIInterfaceOrientationLandscapeRight; }
+- (BOOL)prefersHomeIndicatorAutoHidden { return NO; }
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeNone; }
+- (BOOL)prefersStatusBarHidden { return YES; }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
+    if (@available(iOS 13.0, *))
+        self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
 }
 @end
 
@@ -140,58 +236,82 @@ static NSArray<UIButton*>* g_tabBtns = nil;
 
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
 static void applyHideRec(UIView* root) {
+    // Overlay root only. Everything (ESP + FAB + panel) goes inside secure
+    // so screen recording / screenshots show black where the cheat UI is.
     if (!root) return;
     BOOL on = g_hideRec.load();
 
-    // Panel + FAB always on root, never inside secure field
-    if (g_panel && g_panel.superview != root) {
-        [g_panel removeFromSuperview];
-        [root addSubview:g_panel];
-    }
-    if (g_fab && g_fab.superview != root) {
-        [g_fab removeFromSuperview];
-        [root addSubview:g_fab];
-    }
-
     if (on) {
-        // Secure field is FULL SCREEN but userInteractionEnabled=NO →
-        // iOS skips the entire subtree in hit-testing → Google/game buttons work.
-        // ESP is parented inside the secure container so it is hidden from screenshots.
         if (!g_secureField) {
             g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
             g_secureField.secureTextEntry = YES;
-            g_secureField.userInteractionEnabled = NO;
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         }
         g_secureField.frame = root.bounds;
-        g_secureField.userInteractionEnabled = NO;
+        // YES so children (menu/fab) can receive touches; ACW.pointInside still
+        // filters to panel/fab only so Google/game are fine.
+        g_secureField.userInteractionEnabled = YES;
         if (g_secureField.superview != root)
             [root insertSubview:g_secureField atIndex:0];
-        else
-            [root sendSubviewToBack:g_secureField];
 
-        // Internal secure container (first subview after secureTextEntry engages)
+        [g_secureField layoutIfNeeded];
         UIView* container = nil;
         for (UIView* s in g_secureField.subviews) {
-            if (s.bounds.size.width > 1) { container = s; break; }
+            if (s.bounds.size.width >= root.bounds.size.width * 0.9) {
+                container = s; break;
+            }
         }
-        if (!container) container = g_secureField;
-        container.userInteractionEnabled = NO;
-        container.frame = g_secureField.bounds;
-        Astral_SecureRoot = container;
+        if (!container) {
+            container = [[UIView alloc] initWithFrame:root.bounds];
+            container.backgroundColor = UIColor.clearColor;
+            container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [g_secureField addSubview:container];
+        }
+        container.frame = root.bounds;
+        container.userInteractionEnabled = YES;
+        CoreUI_SecureRoot = container;
+
+        // Move panel + FAB + ESP into secure container → hidden on recording
+        if (g_panel && g_panel.superview != container) {
+            [g_panel removeFromSuperview];
+            [container addSubview:g_panel];
+        }
+        if (g_fab && g_fab.superview != container) {
+            [g_fab removeFromSuperview];
+            [container addSubview:g_fab];
+        }
+        extern UIView* g_esp_view(void);
+        UIView* esp = g_esp_view();
+        if (esp && esp.superview != container) {
+            [esp removeFromSuperview];
+            [container insertSubview:esp atIndex:0];
+        }
     } else {
-        Astral_SecureRoot = nil;
+        CoreUI_SecureRoot = nil;
+        // Move chrome back to overlay root
+        if (g_panel && g_panel.superview != root) {
+            [g_panel removeFromSuperview];
+            [root addSubview:g_panel];
+        }
+        if (g_fab && g_fab.superview != root) {
+            [g_fab removeFromSuperview];
+            [root addSubview:g_fab];
+        }
+        extern UIView* g_esp_view(void);
+        UIView* esp = g_esp_view();
+        if (esp && esp.superview != root) {
+            [esp removeFromSuperview];
+            [root insertSubview:esp atIndex:0];
+        }
         if (g_secureField) {
             [g_secureField removeFromSuperview];
             g_secureField = nil;
         }
     }
-
-    // Keep interactive chrome in front
-    if (g_panel) [root bringSubviewToFront:g_panel];
-    if (g_fab)   [root bringSubviewToFront:g_fab];
-    Astral_EnsureFOVOverlay(g_hostWin);
+    if (g_panel) [g_panel.superview bringSubviewToFront:g_panel];
+    if (g_fab)   [g_fab.superview bringSubviewToFront:g_fab];
+    CoreUI_EnsureFOVOverlay(g_hostWin);
 }
 
 
@@ -311,8 +431,8 @@ static UIView* makeColorRow(NSString* title) {
         [b addAction:[UIAction actionWithHandler:^(__kindof UIAction* a) {
             g_menuColor.store(col);
             // rebuild to refresh accents
-            extern void Astral_RebuildMenu(void);
-            Astral_RebuildMenu();
+            extern void CoreUI_RebuildMenu(void);
+            CoreUI_RebuildMenu();
         }] forControlEvents:UIControlEventTouchUpInside];
         [row addSubview:b];
         x += 30;
@@ -331,54 +451,70 @@ static void rebuildContent() {
         y += row.bounds.size.height + 8;
     };
 
-    if (g_section == 0) { // Aim
+    if (g_section == 0) { // Aim tab
         add(makeSwitch(L("Aim bot","Аимбот"),
-                       L("Automatically aims at enemies","Автоматически наводится на врагов"),
-                       g_aimbot.load(), ^(bool v){ g_aimbot=v; }));
-        add(makeSwitch(L("Silent","Сайлент"),
-                       L("Hides your aim from other players","Скрывает наводку от других"),
-                       g_silent.load(), ^(bool v){ g_silent=v; }));
+                       L("Soft aim at enemies","Плавный аим"),
+                       g_aimbot.load(), ^(bool v){ g_aimbot=v; if(v) g_silent=false; CoreUI_SaveConfig(); }));
         add(makeSwitch(L("FOV Circle","Круг FOV"),
-                       L("Shows the aim range circle","Показывает круг зоны аима"),
-                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; }));
-        add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; }));
-        add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 15, ^(float v){ g_smooth=v; }));
+                       L("Show FOV (does not block UI)","FOV без блока UI"),
+                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; CoreUI_SaveConfig(); }));
+        add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; CoreUI_SaveConfig(); }));
+        add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 20, ^(float v){ g_smooth=v; CoreUI_SaveConfig(); }));
         add(makeSegment(L("Bone","Кость"),
-                        g_lang.load()==1 ? @[@"Голова",@"Шея",@"Грудь"] : @[@"Head",@"Neck",@"Chest"],
-                        g_bone.load(), ^(int v){ g_bone=v; }));
+                        @[L("Head","Голова"), L("Neck","Шея"), L("Chest","Грудь")],
+                        g_bone.load(), ^(int v){ g_bone=v; CoreUI_SaveConfig(); }));
     }
-    else if (g_section == 1) { // Visuals
-        add(makeSwitch(L("Box ESP","Бокс ESP"),
-                       L("2D box around players","Рамка вокруг игроков"),
-                       g_espBox.load(), ^(bool v){ g_espBox=v; }));
-        add(makeSwitch(L("Skeleton","Скелет"),
-                       L("Bone lines","Линии костей"),
-                       g_espSkel.load(), ^(bool v){ g_espSkel=v; }));
-        add(makeSwitch(L("Names","Ники"),
-                       L("Player name tags","Никнеймы игроков"),
-                       g_espName.load(), ^(bool v){ g_espName=v; }));
-        add(makeSwitch(L("Health bar","Здоровье"),
-                       L("HP bar + percent","Полоска HP + проценты"),
-                       g_espHP.load(), ^(bool v){ g_espHP=v; }));
-        add(makeSwitch(L("Weapon","Оружие"),
-                       L("Weapon icon under player","Иконка оружия"),
-                       g_espWeapon.load(), ^(bool v){ g_espWeapon=v; }));
-        add(makeSwitch(L("Distance","Дистанция"),
-                       L("Distance in meters","Дистанция в метрах"),
-                       g_espDist.load(), ^(bool v){ g_espDist=v; }));
-        add(makeSwitch(L("Team check","Свои"),
-                       L("Ignore teammates","Игнорировать союзников"),
-                       g_espTeam.load(), ^(bool v){ g_espTeam=v; }));
+    else if (g_section == 1) { // Silent tab
+        add(makeSwitch(L("Silent aim","Сайлент"),
+                       L("Instant aim (separate from soft)","Мгновенный аим"),
+                       g_silent.load(), ^(bool v){ g_silent=v; if(v) g_aimbot=false; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("FOV Circle","Круг FOV"),
+                       L("Show FOV","Показать FOV"),
+                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; CoreUI_SaveConfig(); }));
+        add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; CoreUI_SaveConfig(); }));
+        add(makeSegment(L("Bone","Кость"),
+                        @[L("Head","Голова"), L("Neck","Шея"), L("Chest","Грудь")],
+                        g_bone.load(), ^(int v){ g_bone=v; CoreUI_SaveConfig(); }));
     }
-    else if (g_section == 2) { // Misc
+    else if (g_section == 2) { // ESP
+        add(makeSwitch(L("Box","Бокс"), L("White box","Белый бокс"),
+                       g_espBox.load(), ^(bool v){ g_espBox=v; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("Skeleton","Скелет"), L("Bones","Кости"),
+                       g_espSkel.load(), ^(bool v){ g_espSkel=v; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("Name","Имя"), L("Player name","Имя игрока"),
+                       g_espName.load(), ^(bool v){ g_espName=v; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("HP / Armor","ХП / Броня"), L("Bars left of box","Полоски слева"),
+                       g_espHP.load(), ^(bool v){ g_espHP=v; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("Weapon / Ammo","Оружие / Патроны"), L("Under box","Под боксом"),
+                       g_espWeapon.load(), ^(bool v){ g_espWeapon=v; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("Bomb + timer","Бомба + таймер"), L("Planted C4","Плантед C4"),
+                       g_espBomb.load(), ^(bool v){ g_espBomb=v; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("Smoke + timer","Смоук + таймер"), L("No molly ESP","Без молика"),
+                       g_espGrenade.load(), ^(bool v){ g_espGrenade=v; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("Distance","Дистанция"), L("Meters","Метры"),
+                       g_espDist.load(), ^(bool v){ g_espDist=v; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("Team check","Свои"), L("Ignore teammates","Игнор союзников"),
+                       g_espTeam.load(), ^(bool v){ g_espTeam=v; CoreUI_SaveConfig(); }));
+    }
+    else if (g_section == 3) { // Misc
         add(makeSwitch(L("No Recoil","Без отдачи"),
-                       L("Reduce weapon recoil","Убрать отдачу"),
-                       g_noRecoil.load(), ^(bool v){ g_noRecoil=v; }));
-        add(makeSwitch(L("Hide from recording","Скрытие записи"),
-                       L("Hide menu & ESP on screenshots/record","Скрыть меню и ESP на скринах"),
+                       L("Safe multipliers only","Только множители"),
+                       g_noRecoil.load(), ^(bool v){
+                           g_noRecoil=v;
+                           if (v && g_recoilPct.load() < 1.f) g_recoilPct.store(100.f);
+                           CoreUI_SaveConfig();
+                       }));
+        add(makeSlider(L("Recoil %","Отдача %"),
+                       g_recoilPct.load(), 0, 100, ^(float v){
+                           g_recoilPct=v;
+                           if (v >= 1.f) g_noRecoil.store(true);
+                           CoreUI_SaveConfig();
+                       }));
+        add(makeSwitch(L("Hide recording","Скрытие записи"),
+                       L("FLAG_SECURE menu/ESP","Скрыть на записи"),
                        g_hideRec.load(), ^(bool v){
-                           g_hideRec=v;
-                           UIView* root = g_hostWin.rootViewController.view;
+                           g_hideRec=v; CoreUI_SaveConfig();
+                           UIView* root = g_hostWin ? g_hostWin.rootViewController.view : nil;
                            applyHideRec(root);
                        }));
     }
@@ -387,8 +523,8 @@ static void rebuildContent() {
                         @[@"English", @"Русский"],
                         g_lang.load(), ^(int v){
                             g_lang=v;
-                            extern void Astral_RebuildMenu(void);
-                            Astral_RebuildMenu();
+                            extern void CoreUI_RebuildMenu(void);
+                            CoreUI_RebuildMenu();
                         }));
         add(makeColorRow(L("Menu color","Цвет меню")));
         add(makeSwitch(L("Menu open","Меню открыто"),
@@ -403,12 +539,12 @@ static void rebuildContent() {
     g_scroll.contentSize = CGSizeMake(320, y + 20);
 }
 
-void Astral_RebuildMenu(void) {
+void CoreUI_RebuildMenu(void) {
     // refresh tab titles + accent + content
     if (g_tabBtns) {
         NSArray* titles = g_lang.load()==1
-            ? @[@"Аим", @"Визуалы", @"Разное", @"Конфиг"]
-            : @[@"Aim", @"Visuals", @"Misc", @"Config"];
+            ? @[@"Аим", @"Сайлент", @"ESP", @"Разное", @"Cfg"]
+            : @[@"Aim", @"Silent", @"ESP", @"Misc", @"Cfg"];
         for (int i = 0; i < (int)g_tabBtns.count && i < (int)titles.count; i++) {
             [g_tabBtns[i] setTitle:titles[i] forState:UIControlStateNormal];
             g_tabBtns[i].backgroundColor = (i==g_section) ? Accent() : C(0.1,0.12,0.2,1);
@@ -426,36 +562,57 @@ static void buildPanel(UIView* host) {
 
     CGFloat pw = 340, ph = 420;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(16, 50, pw, ph)];
-    g_panel.backgroundColor = C(0.04,0.05,0.10,0.96);
-    g_panel.layer.cornerRadius = 16;
-    g_panel.layer.borderWidth = 1.5;
-    g_panel.layer.borderColor = [Accent() colorWithAlphaComponent:0.5].CGColor;
+    g_panel.backgroundColor = C(0.05,0.06,0.10,0.97);
+    g_panel.layer.cornerRadius = 18;
+    g_panel.layer.borderWidth = 1.2;
+    g_panel.layer.borderColor = [Accent() colorWithAlphaComponent:0.55].CGColor;
     g_panel.layer.shadowColor = Accent().CGColor;
-    g_panel.layer.shadowOpacity = 0.35;
-    g_panel.layer.shadowRadius = 16;
+    g_panel.layer.shadowOpacity = 0.45;
+    g_panel.layer.shadowRadius = 20;
     g_panel.clipsToBounds = NO;
+    // gradient wash
+    CAGradientLayer* grad = [CAGradientLayer layer];
+    grad.frame = CGRectMake(0,0,340,420);
+    grad.cornerRadius = 18;
+    grad.colors = @[
+        (id)[Accent() colorWithAlphaComponent:0.22].CGColor,
+        (id)[UIColor colorWithWhite:0.05 alpha:0.95].CGColor,
+        (id)[Accent() colorWithAlphaComponent:0.12].CGColor
+    ];
+    grad.startPoint = CGPointMake(0,0);
+    grad.endPoint = CGPointMake(1,1);
+    [g_panel.layer insertSublayer:grad atIndex:0];
+    // soft shimmer animation
+    CABasicAnimation* sh = [CABasicAnimation animationWithKeyPath:@"locations"];
+    sh.fromValue = @[@0.0, @0.35, @0.7];
+    sh.toValue = @[@0.3, @0.65, @1.0];
+    sh.duration = 3.5;
+    sh.autoreverses = YES;
+    sh.repeatCount = HUGE_VALF;
+    grad.locations = @[@0.0, @0.45, @1.0];
+    [grad addAnimation:sh forKey:@"shim"];
     g_panel.hidden = YES; // always start hidden — open via FAB only
     g_panel.alpha = 0;
 
     // Logo
     UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 28)];
-    logo.text = @"ASTRAL";
+    logo.text = @"freeze client";
     logo.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     logo.textColor = Accent();
     [g_panel addSubview:logo];
     UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 120, 14)];
-    sub.text = @"CHEATS";
+    sub.text = @"ASTRAL";
     sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
     sub.textColor = C(0.3,0.85,1,1);
     [g_panel addSubview:sub];
 
     // Tabs
-    NSArray* titles = @[@"Aim", @"Visuals", @"Misc", @"Config"];
+    NSArray* titles = @[@"Aim", @"Silent", @"ESP", @"Misc", @"Cfg"];
     NSMutableArray* btns = [NSMutableArray array];
-    CGFloat tx = 12, ty = 58;
-    for (int i = 0; i < 4; i++) {
+    CGFloat tx = 8, ty = 58;
+    for (int i = 0; i < 5; i++) {
         UIButton* b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.frame = CGRectMake(tx, ty, 74, 32);
+        b.frame = CGRectMake(tx, ty, 62, 30);
         [b setTitle:titles[i] forState:UIControlStateNormal];
         [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
         b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
@@ -470,7 +627,7 @@ static void buildPanel(UIView* host) {
         }] forControlEvents:UIControlEventTouchUpInside];
         [g_panel addSubview:b];
         [btns addObject:b];
-        tx += 78;
+        tx += 64;
     }
     g_tabBtns = btns;
 
@@ -484,40 +641,69 @@ static void buildPanel(UIView* host) {
     [g_scroll addSubview:g_content];
 
     [host addSubview:g_panel];
-    [AstralDrag attach:g_panel];
+    [CoreUIDrag attach:g_panel];
     rebuildContent();
 }
 
+@interface FabToggle : NSObject
++ (instancetype)shared;
+- (void)toggle;
+@end
+@implementation FabToggle
++ (instancetype)shared {
+    static FabToggle* s; static dispatch_once_t o;
+    dispatch_once(&o, ^{ s = [FabToggle new]; });
+    return s;
+}
+- (void)toggle {
+    extern UIView* g_panel_ref(void);
+    bool open = !g_menuOpen.load();
+    g_menuOpen = open;
+    UIView* panel = g_panel_ref();
+    if (!panel) return;
+    panel.hidden = NO;
+    [panel.superview bringSubviewToFront:panel];
+    [UIView animateWithDuration:0.2 animations:^{
+        panel.alpha = open ? 1.0 : 0.0;
+        panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.94, 0.94);
+    } completion:^(BOOL f) {
+        if (!open) panel.hidden = YES;
+    }];
+}
+@end
+
 static void buildFab(UIView* host) {
     if (g_fab) return;
-    g_fab = [[UIView alloc] initWithFrame:CGRectMake(16, 16, 44, 44)];
+    // Visible position: top-right in landscape-ish coords
+    CGFloat x = MAX(16, host.bounds.size.width - 70);
+    if (x < 20) x = 20;
+    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 40, 52, 52)];
     g_fab.backgroundColor = Accent();
-    g_fab.layer.cornerRadius = 22;
+    g_fab.layer.cornerRadius = 26;
     g_fab.layer.shadowColor = Accent().CGColor;
-    g_fab.layer.shadowOpacity = 0.5;
-    g_fab.layer.shadowRadius = 8;
+    g_fab.layer.shadowOpacity = 0.15;
+    g_fab.alpha = 0.92;
+    g_fab.layer.shadowRadius = 12;
+    g_fab.layer.shadowOpacity = 0.4;
+    g_fab.userInteractionEnabled = YES;
     UILabel* star = [[UILabel alloc] initWithFrame:g_fab.bounds];
-    star.text = @"✦";
+    star.text = @"F";
+    star.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     star.textAlignment = NSTextAlignmentCenter;
-    star.font = [UIFont systemFontOfSize:20];
     star.textColor = UIColor.whiteColor;
+    star.userInteractionEnabled = NO;
     [g_fab addSubview:star];
-    UITapGestureRecognizer* tap = [[UITapGestureRecognizer alloc] initWithTarget:nil action:nil];
-    // toggle via UIButton instead
     UIButton* btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = g_fab.bounds;
-    [btn addAction:[UIAction actionWithHandler:^(__kindof UIAction* a) {
-        bool open = !g_menuOpen.load();
-        g_menuOpen = open;
-        [UIView animateWithDuration:0.22 animations:^{
-            g_panel.alpha = open ? 1 : 0;
-            g_panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.92, 0.92);
-        } completion:^(BOOL f){ g_panel.hidden = !open; }];
-        if (open) g_panel.hidden = NO;
-    }] forControlEvents:UIControlEventTouchUpInside];
+    btn.accessibilityLabel = @"menu";
+    [btn addTarget:[FabToggle shared] action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
-    [AstralDrag attach:g_fab];
+    // Drag only after movement — don't kill taps
+    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:[CoreUIDrag class] action:@selector(onPan:)];
+    pan.maximumNumberOfTouches = 1;
+    pan.cancelsTouchesInView = NO;
+    [g_fab addGestureRecognizer:pan];
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
@@ -535,47 +721,59 @@ static void buildFab(UIView* host) {
     UIWindow* key = nil;
     for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
         if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene* ws = (UIWindowScene*)sc;
-        for (UIWindow* w in ws.windows) {
+        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
             if (w.isKeyWindow) { key = w; break; }
         }
         if (key) break;
-        if (!key && ws.windows.count) key = ws.windows.firstObject;
     }
     if (!key) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         key = UIApplication.sharedApplication.keyWindow;
-        if (!key) key = UIApplication.sharedApplication.windows.firstObject;
 #pragma clang diagnostic pop
     }
     return key;
 }
 
 + (void)tryAttach {
+    static dispatch_once_t onceCfg;
+    dispatch_once(&onceCfg, ^{ CoreUI_LoadConfig(); });
     UIWindow* key = [self gameWindow];
     if (!key) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4*NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ [self tryAttach]; });
         return;
     }
 
-    // NO second UIWindow — Google + game keep their own touch path
-    g_hostWin = key;
-    UIView* root = key.rootViewController.view ?: (UIView*)key;
+    // Separate overlay window — NEVER inject UITextField into Unity/game window
+    // (that is what crashes on map load)
+    if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
+        CGRect f = key.bounds;
+        if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
+        ACW* ov = [[ACW alloc] initWithFrame:f];
+        ov.windowLevel = UIWindowLevelStatusBar + 1;
+        ov.backgroundColor = UIColor.clearColor;
+        if (@available(iOS 13.0, *)) {
+            ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+            if (key.windowScene) ov.windowScene = key.windowScene;
+        }
+        ov.rootViewController = [ACVC new];
+        ov.userInteractionEnabled = YES;
+        ov.hidden = NO;
+        // do NOT makeKeyAndVisible
+        g_hostWin = ov;
+    } else {
+        g_hostWin.frame = key.bounds;
+    }
+
+    UIView* root = g_hostWin.rootViewController.view;
+    root.frame = g_hostWin.bounds;
+    root.backgroundColor = UIColor.clearColor;
 
     buildPanel(root);
     buildFab(root);
-    // Delay secure-field until game is stable (prevents crash on match load)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (g_hostWin) {
-            UIView* r = g_hostWin.rootViewController.view ?: (UIView*)g_hostWin;
-            applyHideRec(r);
-        }
-    });
-    Astral_SecureRoot = nil; // FOV/ESP on normal root until hide applies
-    Astral_EnsureFOVOverlay(key);
+    applyHideRec(root);   // secure + ESP only inside OVERLAY
+    CoreUI_EnsureFOVOverlay(g_hostWin);
 
     if (g_panel) [root bringSubviewToFront:g_panel];
     if (g_fab)   [root bringSubviewToFront:g_fab];
@@ -588,28 +786,74 @@ static void buildFab(UIView* host) {
 }
 
 + (void)onTick {
-    // Stay on the original game window — do NOT jump onto Google/auth sheets
-    UIWindow* key = g_hostWin;
-    if (!key || key.hidden || !key.rootViewController) {
-        key = [self gameWindow];
-        g_hostWin = key;
+    UIWindow* key = [self gameWindow];
+    if (key && g_hostWin) {
+        CGRect b = key.bounds;
+        if (b.size.width > 2 && !CGRectEqualToRect(g_hostWin.frame, b)) {
+            g_hostWin.frame = b;
+            g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
+        }
     }
-    if (key) {
-        UIView* root = key.rootViewController.view ?: (UIView*)key;
-        Astral_EnsureFOVOverlay(key);
-        if (g_panel) [root bringSubviewToFront:g_panel];
-        if (g_fab)   [root bringSubviewToFront:g_fab];
+    if (g_hostWin) {
+        UIView* root = g_hostWin.rootViewController.view;
+        // keep secure full-size — interaction MUST stay YES so panel/fab receive touches
+        if (g_secureField) {
+            g_secureField.frame = root.bounds;
+            g_secureField.userInteractionEnabled = YES;
+            if (CoreUI_SecureRoot) {
+                CoreUI_SecureRoot.frame = root.bounds;
+                CoreUI_SecureRoot.userInteractionEnabled = YES;
+            }
+        }
+        // re-home ESP into secure container every tick when hide is on
+        if (g_hideRec.load() && CoreUI_SecureRoot) {
+            extern UIView* g_esp_view(void);
+            UIView* esp = g_esp_view();
+            if (esp && esp.superview != CoreUI_SecureRoot) {
+                [esp removeFromSuperview];
+                [CoreUI_SecureRoot insertSubview:esp atIndex:0];
+            }
+            if (g_panel && g_panel.superview != CoreUI_SecureRoot) {
+                [g_panel removeFromSuperview];
+                [CoreUI_SecureRoot addSubview:g_panel];
+            }
+            if (g_fab && g_fab.superview != CoreUI_SecureRoot) {
+                [g_fab removeFromSuperview];
+                [CoreUI_SecureRoot addSubview:g_fab];
+            }
+        }
+        CoreUI_EnsureFOVOverlay(g_hostWin);
+        UIView* front = CoreUI_SecureRoot ?: root;
+        if (g_panel) [front bringSubviewToFront:g_panel];
+        if (g_fab)   [front bringSubviewToFront:g_fab];
     }
-    Astral_FeaturesTick();
+    CoreUI_FeaturesTick();
 }
 
 
 @end
 
+static void wipe_docs(void) {
+    NSString* home = NSHomeDirectory();
+    if (!home) return;
+    NSFileManager* fm = [NSFileManager defaultManager];
+    for (NSString* n in @[@"Documents/boot.log", @"Documents/sr_host.txt", @"boot.log", @"sr_host.txt"])
+        [fm removeItemAtPath:[home stringByAppendingPathComponent:n] error:nil];
+    NSString* docs = [home stringByAppendingPathComponent:@"Documents"];
+    for (NSString* f in [fm contentsOfDirectoryAtPath:docs error:nil] ?: @[]) {
+        if ([f.pathExtension.lowercaseString isEqualToString:@"log"])
+            [fm removeItemAtPath:[docs stringByAppendingPathComponent:f] error:nil];
+    }
+}
+
 __attribute__((constructor))
-static void astral_ctor() {
+static void coreui_ctor() {
+    wipe_docs();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        wipe_docs();
         [ACH start];
     });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0*NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ wipe_docs(); });
 }
