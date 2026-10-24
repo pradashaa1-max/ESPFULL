@@ -103,14 +103,11 @@ static void* pc_tr(void* pc) {
 static Vec3 w2s(void* cam, Vec3 w) {
     Vec3 o{};
     if (!ok_ptr(cam) || !unity_base()) return o;
-    using F = void (*)(void*, Vec3*, int, Vec3*);
-    R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
-    UIScreen* sc = [UIScreen mainScreen];
-    float s = (float)sc.nativeScale;
-    if (s < 1.f) s = (float)sc.scale;
-    if (s < 1.f) s = 1.f;
-    o.x /= s;
-    o.y /= s;
+    @try {
+        using F = void (*)(void*, Vec3*, int, Vec3*);
+        R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
+        // Do NOT divide by nativeScale — that made boxes tiny on iPhone
+    } @catch (...) { return Vec3{}; }
     return o;
 }
 
@@ -624,49 +621,30 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-        CGFloat top=0, bot=0, hgt=0, mid=0, wid=0, left=0, hy=0, hx=0, fy=0;
-        Vec3 feetWorld = p.pos; // for distance label
-        // Aim/silent: frozen screen box — ESP stays on player, not crosshair
-        if ((g_aimbot.load() || g_silent.load()) && p.hasScr) {
-            bot = p.sy;
-            hgt = p.sh;
-            top = bot - hgt;
-            mid = p.sx;
-            wid = hgt * 0.45f;
-            left = mid - wid * 0.5f;
-            hy = top;
-            hx = mid;
-            fy = bot;
-            if (hgt < 4.f) continue;
-        } else {
-            Vec3 feet = p.pos, headW{};
-            Vec3 hb{}, fb{};
-            if (biped_head_feet(p.obj, &hb, &fb)) {
-                feet = fb; headW = hb;
-            } else if (ok_ptr(p.tr)) {
-                Vec3 live = get_pos(p.tr);
-                if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
-                headW = {feet.x, feet.y + headY, feet.z};
-            } else {
-                headW = {feet.x, feet.y + headY, feet.z};
-            }
-            feetWorld = feet;
-            Vec3 sf = w2s(cam, feet);
-            Vec3 shd = w2s(cam, headW);
-            if (sf.z < 0.05f && shd.z < 0.05f) continue;
-            CGFloat fx = sf.x - 3.f;
-            hx = shd.x - 3.f;
-            fy = H - sf.y - 3.f;
-            hy = H - shd.y - 3.f;
-            if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
-            top = fminf(fy, hy);
-            bot = fmaxf(fy, hy);
-            hgt = bot - top;
-            if (hgt < 4.f) continue;
-            mid  = (fx + hx) * 0.5f;
-            wid  = hgt * 0.45f;
-            left = mid - wid * 0.5f;
+        // Classic ESP (old working style): root pos + fixed height
+        Vec3 feet = p.pos;
+        if (ok_ptr(p.tr)) {
+            Vec3 live = get_pos(p.tr);
+            if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
         }
+        Vec3 feetWorld = feet;
+        Vec3 headW = {feet.x, feet.y + headY, feet.z};
+        Vec3 sf = w2s(cam, feet);
+        Vec3 shd = w2s(cam, headW);
+        if (sf.z < 0.1f && shd.z < 0.1f) continue;
+        CGFloat fx = sf.x, hx = shd.x;
+        CGFloat fy = H - sf.y, hy = H - shd.y;
+        if ((fx < -100 && hx < -100) || (fx > W+100 && hx > W+100)) continue;
+        CGFloat top = fminf(fy, hy);
+        CGFloat bot = fmaxf(fy, hy);
+        CGFloat hgt = bot - top;
+        if (hgt < 12.f) continue;
+        if (hgt > H * 0.9f) continue;
+        CGFloat mid = (fx + hx) * 0.5f;
+        CGFloat wid = hgt * 0.5f;
+        CGFloat left = mid - wid * 0.5f;
+        CGFloat hy2 = hy, hx2 = hx, fy2 = fy;
+        hy = hy2; hx = hx2; fy = fy2;
         CGFloat corner = fmaxf(6.f, hgt * 0.22f);
 
         // ESP style: white box + left green HP (reference shot)
@@ -874,7 +852,7 @@ void CoreUI_EnsureFOVOverlay(UIWindow* win) {
     CGRect b = root.bounds;
     if (b.size.width < 2) b = game.bounds;
     b.origin = CGPointZero;
-    if (b.size.height > 80.f) b.size.height -= 34.f; // home indicator free
+    // full frame — must match W2S screen space or ESP is tiny/offset
     if (!g_esp) {
         g_esp = [[ESPView alloc] initWithFrame:b];
         g_esp.userInteractionEnabled = NO; // NEVER steal touches
@@ -1036,13 +1014,23 @@ static void run_aim(void* cam, void* camTr) {
         while (dy >  180.f) dy -= 360.f;
         while (dy < -180.f) dy += 360.f;
 
-        // Angles only — NO LookAt (LookAt made ESP swim/stick to crosshair + glitch up)
+        // Old aim: angles + LookAt
         if (g_silent.load()) {
             *aPitch = pitch;
             *aYaw   = curY + dy;
+            if (ok_ptr(aimTr) && unity_base()) {
+                Vec3 up{0, 1, 0};
+                using Look = void (*)(void*, Vec3*, Vec3*);
+                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
+            }
         } else {
             *aPitch = curP + (pitch - curP) / sm;
             *aYaw   = curY + dy / sm;
+            if (ok_ptr(aimTr) && unity_base() && sm <= 3.f) {
+                Vec3 up{0, 1, 0};
+                using Look = void (*)(void*, Vec3*, Vec3*);
+                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
+            }
         }
     } @catch (...) {
         g_haveSilent = false;

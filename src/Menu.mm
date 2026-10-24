@@ -814,7 +814,7 @@ static void buildFab(UIView* host) {
         if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
         // full frame — home indicator handled by pointInside, not by cropping window
         ACW* ov = [[ACW alloc] initWithFrame:f];
-        ov.windowLevel = UIWindowLevelAlert; // visible above Unity
+        ov.windowLevel = UIWindowLevelNormal + 5;
         ov.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *)) {
             ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -919,7 +919,11 @@ static void buildFab(UIView* host) {
         }
         CoreUI_EnsureFOVOverlay(g_hostWin);
         UIView* front = CoreUI_SecureRoot ?: root;
-        if (g_hostWin) g_hostWin.hidden = NO;
+        if (g_hostWin) {
+            g_hostWin.hidden = NO;
+            if (@available(iOS 13.0, *))
+                g_hostWin.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        }
         if (g_fab) {
             g_fab.hidden = NO;
             g_fab.alpha = 1.0;
