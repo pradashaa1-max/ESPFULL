@@ -134,10 +134,13 @@ struct PSnap {
     bool  local;
     float hp;
     float armor;
-    int   ammo;      // current
-    int   ammoMax;   // magazine capacity
+    int   ammo;
+    int   ammoMax;
     char  name[32];
     char  weapon[24];
+    // frozen screen box (set at refresh) — used while aim/silent so ESP does not stick to crosshair
+    float sx, sy, sh; // feet screen x,y + pixel height
+    bool  hasScr;
 };
 
 struct WorldSnap {
@@ -323,6 +326,8 @@ static void refresh(void* camTr) {
         s.pos = p;
         s.team = team_of(pc);
         s.local = is_mine(pc);
+        s.hasScr = false;
+        s.sx = s.sy = s.sh = 0;
         s.hp = -1.f;
         s.armor = -1.f;
         s.ammo = -1;
@@ -353,6 +358,29 @@ static void refresh(void* camTr) {
                 read_str(ns, s.name, sizeof(s.name));
         }
         if (!s.name[0]) snprintf(s.name, sizeof(s.name), "P");
+        // precompute screen box with CURRENT camera (before aim writes this frame)
+        @try {
+            void* cam = main_cam();
+            if (ok_ptr(cam)) {
+                Vec3 feet = s.pos;
+                Vec3 head = {feet.x, feet.y + 1.55f, feet.z};
+                Vec3 sf = w2s(cam, feet);
+                Vec3 sh = w2s(cam, head);
+                if (sf.z >= 0.05f || sh.z >= 0.05f) {
+                    CGFloat H = g_esp ? g_esp.bounds.size.height : UIScreen.mainScreen.bounds.size.height;
+                    CGFloat fy = H - sf.y - 3.f;
+                    CGFloat hy = H - sh.y - 3.f;
+                    CGFloat top = fminf(fy, hy), bot = fmaxf(fy, hy);
+                    CGFloat hgt = bot - top;
+                    if (hgt >= 4.f && hgt < H) {
+                        s.sx = (sf.x + sh.x) * 0.5f - 3.f;
+                        s.sy = bot; // feet y in UIKit
+                        s.sh = hgt;
+                        s.hasScr = true;
+                    }
+                }
+            }
+        } @catch (...) {}
         tmp.push_back(s);
     }
     if (mines == 0 && !tmp.empty() && bestD < 5.f)
@@ -545,32 +573,41 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-        // Always use snapshot pos when aim/silent — live transform follows LookAt and "swims"
-        Vec3 feet = p.pos;
-        if (!g_aimbot.load() && !g_silent.load() && ok_ptr(p.tr)) {
-            Vec3 live = get_pos(p.tr);
-            if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
+        CGFloat top, bot, hgt, mid, wid, left, hy, hx;
+        // Aim/silent: use FROZEN screen box from refresh — never re-w2s (that sticks ESP to crosshair)
+        if ((g_aimbot.load() || g_silent.load()) && p.hasScr) {
+            bot = p.sy;
+            hgt = p.sh;
+            top = bot - hgt;
+            mid = p.sx;
+            wid = hgt * 0.45f;
+            left = mid - wid * 0.5f;
+            hy = top;
+            hx = mid;
+            if (hgt < 4.f) continue;
+        } else {
+            Vec3 feet = p.pos;
+            if (ok_ptr(p.tr)) {
+                Vec3 live = get_pos(p.tr);
+                if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
+            }
+            Vec3 head = {feet.x, feet.y + headY, feet.z};
+            Vec3 sf = w2s(cam, feet);
+            Vec3 shd = w2s(cam, head);
+            if (sf.z < 0.05f && shd.z < 0.05f) continue;
+            CGFloat fx = sf.x - 3.f;
+            hx = shd.x - 3.f;
+            CGFloat fy = H - sf.y - 3.f;
+            hy = H - shd.y - 3.f;
+            if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
+            top = fminf(fy, hy);
+            bot = fmaxf(fy, hy);
+            hgt = bot - top;
+            if (hgt < 4.f) continue;
+            mid  = (fx + hx) * 0.5f;
+            wid  = hgt * 0.45f;
+            left = mid - wid * 0.5f;
         }
-        Vec3 head = {feet.x, feet.y + headY, feet.z};
-
-        Vec3 sf = w2s(cam, feet);
-        Vec3 sh = w2s(cam, head);
-        if (sf.z < 0.05f && sh.z < 0.05f) continue;
-
-        CGFloat fx = sf.x - 3.f;
-        CGFloat hx = sh.x - 3.f;
-        CGFloat fy = H - sf.y - 3.f;
-        CGFloat hy = H - sh.y - 3.f;
-
-        if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
-
-        CGFloat top = fminf(fy, hy);
-        CGFloat bot = fmaxf(fy, hy);
-        CGFloat hgt = bot - top;
-        if (hgt < 4.f) continue; // too small / invalid — skip, don't inflate
-        CGFloat mid  = (fx + hx) * 0.5f;
-        CGFloat wid  = hgt * 0.45f;
-        CGFloat left = mid - wid * 0.5f;
         CGFloat corner = fmaxf(6.f, hgt * 0.22f);
 
         // ESP style: white box + left green HP (reference shot)
@@ -873,11 +910,7 @@ static void run_aim(void* cam, void* camTr) {
             if (p.local) continue;
             if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-            Vec3 base = p.pos;
-            if (ok_ptr(p.tr)) {
-                Vec3 live = get_pos(p.tr);
-                if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
-            }
+            Vec3 base = p.pos; // snapshot only — live pos follows aim and breaks ESP
             Vec3 bone = {base.x, base.y + boneY, base.z};
             float distTo = vdist(cpos, bone);
 
@@ -923,24 +956,13 @@ static void run_aim(void* cam, void* camTr) {
         while (dy >  180.f) dy -= 360.f;
         while (dy < -180.f) dy += 360.f;
 
+        // Angles only — NO LookAt (LookAt made ESP swim/stick to crosshair + glitch up)
         if (g_silent.load()) {
             *aPitch = pitch;
             *aYaw   = curY + dy;
-            // Silent: force cam transform look (angles alone often ignored by game)
-            if (ok_ptr(aimTr) && unity_base()) {
-                Vec3 up{0, 1, 0};
-                using Look = void (*)(void*, Vec3*, Vec3*);
-                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
-            }
         } else {
             *aPitch = curP + (pitch - curP) / sm;
             *aYaw   = curY + dy / sm;
-            // soft aim also nudges transform lightly for reliability
-            if (ok_ptr(aimTr) && unity_base() && sm <= 3.f) {
-                Vec3 up{0, 1, 0};
-                using Look = void (*)(void*, Vec3*, Vec3*);
-                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
-            }
         }
     } @catch (...) {
         g_haveSilent = false;

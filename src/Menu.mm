@@ -207,7 +207,7 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     CGFloat H = self.bounds.size.height;
     CGFloat W = self.bounds.size.width;
     // system gesture zones — always pass through (шторка / home)
-    if (point.y > H - 28.f) return NO;   // bottom home indicator
+    if (point.y > H - 40.f) return NO;   // bottom home indicator
     if (point.y < 12.f) return NO;         // top status / CC swipe
     if (panel && !panel.hidden && panel.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:panel];
@@ -771,6 +771,8 @@ static void buildFab(UIView* host) {
     UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:[CoreUIDrag class] action:@selector(onPan:)];
     pan.maximumNumberOfTouches = 1;
     pan.cancelsTouchesInView = NO;
+    pan.delaysTouchesBegan = NO;
+    pan.delaysTouchesEnded = NO;
     [g_fab addGestureRecognizer:pan];
 }
 
