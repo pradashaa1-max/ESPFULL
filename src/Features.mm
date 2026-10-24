@@ -52,21 +52,39 @@ static Fn R(uint64_t o) { return (Fn)(unity_base() + o); }
 static bool ok_ptr(void* o) {
     if (!o) return false;
     uintptr_t a = (uintptr_t)o;
-    return a > 0x10000 && (a & 1) == 0;
+    // iOS userland + aligned; reject tagged/low/kernelish
+    if (a < 0x100000000ULL || a > 0x300000000ULL) return false;
+    if (a & 0x7) return false;
+    return true;
+}
+
+template<typename T>
+static bool sread(void* base, size_t off, T* out) {
+    if (!ok_ptr(base) || !out) return false;
+    @try {
+        *out = *(T*)((char*)base + off);
+        return true;
+    } @catch (...) { return false; }
 }
 
 static Vec3 get_pos(void* tr) {
     Vec3 o{};
     if (!ok_ptr(tr) || !unity_base()) return o;
-    using F = void (*)(void*, Vec3*);
-    R<F>(Offsets::Transform_get_position_Injected)(tr, &o);
+    @try {
+        using F = void (*)(void*, Vec3*);
+        R<F>(Offsets::Transform_get_position_Injected)(tr, &o);
+        if (o.x != o.x || o.y != o.y || o.z != o.z) return Vec3{};
+    } @catch (...) { return Vec3{}; }
     return o;
 }
 
 static void* main_cam() {
     if (!unity_base()) return nullptr;
-    using F = void* (*)();
-    return R<F>(Offsets::Camera_get_main)();
+    @try {
+        using F = void* (*)();
+        void* c = R<F>(Offsets::Camera_get_main)();
+        return ok_ptr(c) ? c : nullptr;
+    } @catch (...) { return nullptr; }
 }
 
 static void* get_tr(void* c) {
@@ -141,19 +159,73 @@ static int team_of(void* pc) {
 }
 
 static float read_hp01(void* pc) {
-    // best-effort: PlayerHitController @ 0x88 — scan a few floats for 0..100 range
     if (!ok_ptr(pc)) return -1.f;
-    void* hit = *(void**)((char*)pc + Offsets::PC_hitController);
-    if (!ok_ptr(hit)) return -1.f;
-    // try common relative floats
-    const size_t cands[] = {0xC8, 0xD0, 0xD4, 0xD8, 0x4C, 0x50};
-    for (size_t o : cands) {
-        float v = *(float*)((char*)hit + o);
-        if (v == v && v > 1.f && v <= 100.f) return v / 100.f;
-        if (v == v && v > 0.f && v <= 1.f) return v;
-    }
+    @try {
+        // NetworkController first (health often replicated here)
+        void* net = nullptr;
+        if (sread(pc, Offsets::PC_networkController, &net) && ok_ptr(net)) {
+            const size_t offs[] = {0x90, 0x94, 0x98, 0x9C, 0xA0, 0xA4, 0x88, 0x8C};
+            for (size_t o : offs) {
+                int iv = 0;
+                if (sread(net, o, &iv) && iv > 0 && iv <= 100)
+                    return iv / 100.f;
+                float fv = 0.f;
+                if (sread(net, o, &fv) && fv == fv && fv > 0.f && fv <= 100.f)
+                    return (fv > 1.f) ? fv / 100.f : fv;
+            }
+        }
+        void* hit = nullptr;
+        if (sread(pc, Offsets::PC_hitController, &hit) && ok_ptr(hit)) {
+            const size_t offs[] = {0xC8, 0xD0, 0xD4, 0xD8, 0x4C, 0x50, 0xB0, 0xB4};
+            for (size_t o : offs) {
+                float v = 0.f;
+                if (!sread(hit, o, &v)) continue;
+                if (v == v && v > 1.f && v <= 100.f) return v / 100.f;
+                if (v == v && v > 0.f && v <= 1.f) return v;
+            }
+        }
+    } @catch (...) {}
     return -1.f;
 }
+
+static float read_armor(void* pc) {
+    if (!ok_ptr(pc)) return -1.f;
+    @try {
+        void* net = nullptr;
+        if (!sread(pc, Offsets::PC_networkController, &net) || !ok_ptr(net)) return -1.f;
+        const size_t offs[] = {0x94, 0x98, 0x9C, 0xA0, 0xA4, 0xA8};
+        for (size_t o : offs) {
+            int iv = 0;
+            if (sread(net, o, &iv) && iv >= 0 && iv <= 100) {
+                // skip if same slot already used as hp-like 100 always
+                return (float)iv;
+            }
+        }
+    } @catch (...) {}
+    return -1.f;
+}
+
+static void read_ammo(void* pc, int* cur, int* mx) {
+    if (cur) *cur = -1;
+    if (mx) *mx = -1;
+    if (!ok_ptr(pc)) return;
+    @try {
+        void* wry = nullptr;
+        if (!sread(pc, Offsets::PC_weaponry, &wry) || !ok_ptr(wry)) return;
+        void* wc = nullptr;
+        if (!sread(wry, Offsets::Wry_weaponCtrl, &wc) || !ok_ptr(wc)) return;
+        // WeaponController: int @ 0x60 often clip; probe neighbors
+        const size_t offs[] = {0x60, 0x64, 0x54, 0x5C};
+        for (size_t o : offs) {
+            int v = 0;
+            if (sread(wc, o, &v) && v >= 0 && v <= 200) {
+                if (cur && *cur < 0) *cur = v;
+                else if (mx && *mx < 0 && v > 0) { *mx = v; break; }
+            }
+        }
+    } @catch (...) {}
+}
+
 
 static void read_str(void* strObj, char* out, size_t n) {
     out[0] = 0;
@@ -256,56 +328,29 @@ static void refresh(void* camTr) {
         s.ammo = -1;
         s.ammoMax = -1;
         s.weapon[0] = 0;
-        // optional extras — never crash match enter
+        // optional extras — never crash
         @try {
-            // HP/Armor from NetworkController @ PC+0x88 (network this dump) → ints 0x90 / 0x94
-            s.hp = -1.f;
-            if (g_espHP.load()) {
-                void* net = *(void**)((char*)pc + Offsets::PC_networkController);
-                if (!ok_ptr(net))
-                    net = *(void**)((char*)pc + 0x98);
-                if (ok_ptr(net)) {
-                    int hv = *(int*)((char*)net + 0x90);
-                    int ar = *(int*)((char*)net + 0x94);
-                    if (hv >= 0 && hv <= 100) s.hp = hv / 100.f;
-                    if (ar >= 0 && ar <= 100) s.armor = (float)ar;
-                    // fallback other int slots
-                    if (s.hp < 0.f) {
-                        for (size_t o : {0x90ul, 0x94ul, 0x98ul, 0xB8ul}) {
-                            int v = *(int*)((char*)net + o);
-                            if (v > 0 && v <= 100) { s.hp = v / 100.f; break; }
-                        }
-                    }
-                }
-                // PC ints 0x128/0x12C
-                if (s.hp < 0.f) {
-                    int hv = *(int*)((char*)pc + 0x128);
-                    int ar = *(int*)((char*)pc + 0x12C);
-                    if (hv >= 0 && hv <= 100) s.hp = hv / 100.f;
-                    if (ar >= 0 && ar <= 100) s.armor = (float)ar;
+            s.hp = read_hp01(pc);
+            s.armor = read_armor(pc);
+            read_ammo(pc, &s.ammo, &s.ammoMax);
+            void* wry = nullptr;
+            if (sread(pc, Offsets::PC_weaponry, &wry) && ok_ptr(wry)) {
+                void* wc = nullptr;
+                if (sread(wry, Offsets::Wry_weaponCtrl, &wc) && ok_ptr(wc)) {
+                    void* ns = nullptr;
+                    if (sread(wc, 0x58, &ns) && ok_ptr(ns))
+                        read_str(ns, s.weapon, sizeof(s.weapon));
                 }
             }
-            if (g_espWeapon.load()) {
-                void* wry = *(void**)((char*)pc + Offsets::PC_weaponry);
-                if (ok_ptr(wry)) {
-                    void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
-                    if (ok_ptr(wc)) {
-                        void* ns = *(void**)((char*)wc + 0x58);
-                        if (ok_ptr(ns)) read_str(ns, s.weapon, sizeof(s.weapon));
-                        // ammo disabled — offsets gave random values
+        } @catch (...) {
+            s.hp = -1.f; s.armor = -1.f; s.ammo = -1; s.ammoMax = -1;
+        }
 
-                    }
-                }
-            }
-        } @catch (...) {}
-        if (s.local) mines++;
-        float d = vdist(p, cpos);
-        if (d < bestD) { bestD = d; bestIdx = tmp.size(); }
-        s.name[0] = 0;
-        void* pp = *(void**)((char*)pc + Offsets::PC_photonPlayer);
-        if (ok_ptr(pp)) {
-            void* ns = *(void**)((char*)pp + Offsets::PP_nameField);
-            if (ok_ptr(ns)) read_str(ns, s.name, sizeof(s.name));
+        void* pp = nullptr;
+        if (sread(pc, Offsets::PC_photonPlayer, &pp) && ok_ptr(pp)) {
+            void* ns = nullptr;
+            if (sread(pp, Offsets::PP_nameField, &ns) && ok_ptr(ns))
+                read_str(ns, s.name, sizeof(s.name));
         }
         if (!s.name[0]) snprintf(s.name, sizeof(s.name), "P");
         tmp.push_back(s);
@@ -377,14 +422,22 @@ static void refresh(void* camTr) {
                         } else {
                             snprintf(w.label, sizeof(w.label), "GRENADE");
                             @try {
-                                // GrenadeParameters often @ 0x18 on DroppedGrenadeController
-                                void* gp = *(void**)((char*)o + 0x18);
-                                if (ok_ptr(gp)) {
-                                    // try common name string offsets on parameters SO
+                                // timers only — floats 0..60 on controller; classify smoke/molly by name later
+                                for (size_t to : {0x40ul, 0x44ul, 0x48ul, 0x4Cul, 0x50ul, 0xA0ul}) {
+                                    float tv = 0.f;
+                                    if (sread(o, to, &tv) && tv==tv && tv>0.3f && tv<=60.f) {
+                                        w.timer = tv;
+                                        break;
+                                    }
+                                }
+                                // soft name from +0x18 params (optional)
+                                void* gp = nullptr;
+                                if (sread(o, 0x18, &gp) && ok_ptr(gp)) {
                                     for (size_t no : {0x10ul, 0x18ul, 0x20ul}) {
-                                        void* ns2 = *(void**)((char*)gp + no);
+                                        void* ns2 = nullptr;
+                                        if (!sread(gp, no, &ns2) || !ok_ptr(ns2)) continue;
                                         char tmpn[20]{};
-                                        if (ok_ptr(ns2)) read_str(ns2, tmpn, sizeof(tmpn));
+                                        read_str(ns2, tmpn, sizeof(tmpn));
                                         if (tmpn[0] && strlen(tmpn) < 18) {
                                             snprintf(w.label, sizeof(w.label), "%s", tmpn);
                                             break;
@@ -456,7 +509,7 @@ UIView* g_esp_view(void) { return g_esp; }
     CGFloat H = self.bounds.size.height;
     if (W < 2 || H < 2) return;
 
-    if (g_fovDraw.load() && g_aimbot.load()) {
+    if (g_fovDraw.load() && (g_aimbot.load() || g_silent.load())) {
         CGFloat cx = W * 0.5f, cy = H * 0.5f;
         CGFloat side = W < H ? W : H;
         CGFloat r = side * (0.04f + g_fov.load() / 30.f * 0.20f);
@@ -565,14 +618,26 @@ UIView* g_esp_view(void) { return g_esp; }
             CGFloat barW = 4.f;
             CGFloat bx = left - 7.f;
             CGFloat hp = p.hp;
-            CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.45].CGColor);
+            if (hp > 1.f) hp = 1.f;
+            CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.5].CGColor);
             CGContextFillRect(ctx, CGRectMake(bx, top, barW, barH));
-            UIColor* hc = hp > 0.5f ? [UIColor colorWithRed:0.2 green:0.9 blue:0.3 alpha:1]
+            UIColor* hc = hp > 0.5f ? [UIColor colorWithRed:0.2 green:0.95 blue:0.35 alpha:1]
                          : hp > 0.25f ? [UIColor colorWithRed:0.95 green:0.75 blue:0.1 alpha:1]
                          : [UIColor colorWithRed:0.95 green:0.2 blue:0.15 alpha:1];
             CGContextSetFillColorWithColor(ctx, hc.CGColor);
             CGFloat fill = barH * hp;
             CGContextFillRect(ctx, CGRectMake(bx, top + (barH - fill), barW, fill));
+            // armor blue bar
+            if (p.armor >= 0.f) {
+                CGFloat ar = p.armor;
+                if (ar > 100.f) ar = 100.f;
+                CGFloat af = barH * (ar / 100.f);
+                CGFloat ax = bx - 5.f;
+                CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.5].CGColor);
+                CGContextFillRect(ctx, CGRectMake(ax, top, 3.f, barH));
+                CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:0.3 green:0.7 blue:1 alpha:1].CGColor);
+                CGContextFillRect(ctx, CGRectMake(ax, top + (barH - af), 3.f, af));
+            }
         }
         if (nameOn || distOn || g_espWeapon.load()) {
             NSMutableString* lab = [NSMutableString stringWithUTF8String:p.name];
@@ -644,33 +709,26 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat x = sc.x - 3.f;
         CGFloat y = H - sc.y - 3.f;
         if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
-        // classify: bomb / smoke / molly / other nade
-        BOOL isSmoke = NO, isMolly = NO;
+        // bomb / smoke only — molly ESP removed
+        BOOL isSmoke = NO;
         if (!isBomb) {
             const char* L = w.label;
             if (strcasestr(L, "smoke") || strcasestr(L, "Smoke")) isSmoke = YES;
-            else if (strcasestr(L, "molot") || strcasestr(L, "incendi") || strcasestr(L, "fire")
-                  || strcasestr(L, "Molly") || strcasestr(L, "Molotov")) isMolly = YES;
+            else continue; // skip molly / other
         }
         UIColor* col = isBomb
             ? [UIColor colorWithRed:1 green:0.25 blue:0.1 alpha:1]
-            : isSmoke ? [UIColor colorWithRed:0.75 green:0.75 blue:0.8 alpha:1]
-            : isMolly ? [UIColor colorWithRed:1 green:0.45 blue:0.05 alpha:1]
-            : [UIColor colorWithRed:1 green:0.85 blue:0.15 alpha:1];
+            : [UIColor colorWithRed:0.75 green:0.75 blue:0.8 alpha:1];
         CGContextSetFillColorWithColor(ctx, col.CGColor);
         CGContextFillEllipseInRect(ctx, CGRectMake(x - 6, y - 6, 12, 12));
         // label + timer
         NSString* lab;
         if (w.timer >= 0.f) {
             if (isBomb) lab = [NSString stringWithFormat:@"BOMB %.1fs", w.timer];
-            else if (isSmoke) lab = [NSString stringWithFormat:@"SMOKE %.1fs", w.timer];
-            else if (isMolly) lab = [NSString stringWithFormat:@"MOLLY %.1fs", w.timer];
-            else lab = [NSString stringWithFormat:@"%s %.1fs", w.label, w.timer];
+            else lab = [NSString stringWithFormat:@"SMOKE %.1fs", w.timer];
         } else {
             if (isBomb) lab = @"BOMB";
-            else if (isSmoke) lab = @"SMOKE";
-            else if (isMolly) lab = @"MOLLY";
-            else lab = [NSString stringWithUTF8String:w.label];
+            else lab = @"SMOKE";
         }
         NSDictionary* attrs = @{
             NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
@@ -714,30 +772,27 @@ void CoreUI_EnsureFOVOverlay(UIWindow* win) {
 static void apply_recoil(void* localPc) {
     if (!g_noRecoil.load()) return;
     float pct = g_recoilPct.load();
-    if (pct < 0.5f) pct = 100.f; // switch on with slider 0 → treat as full no-recoil
+    if (pct < 0.5f) pct = 100.f;
     if (!ok_ptr(localPc) || !unity_base()) return;
 
     static float lastPct = -999.f;
     static void* lastParams = nullptr;
 
     @try {
-        void* wry = *(void**)((char*)localPc + Offsets::PC_weaponry);
-        if (!ok_ptr(wry)) return;
-        void* wc = *(void**)((char*)wry + Offsets::Wry_weaponCtrl);
-        if (!ok_ptr(wc)) return;
+        void* wry = nullptr;
+        if (!sread(localPc, Offsets::PC_weaponry, &wry) || !ok_ptr(wry)) return;
+        void* wc = nullptr;
+        if (!sread(wry, Offsets::Wry_weaponCtrl, &wc) || !ok_ptr(wc)) return;
 
-        void* ns = *(void**)((char*)wc + 0x58);
+        void* ns = nullptr;
         char wname[24]{};
-        if (ok_ptr(ns)) read_str(ns, wname, sizeof(wname));
+        if (sread(wc, 0x58, &ns) && ok_ptr(ns)) read_str(ns, wname, sizeof(wname));
         if (wname[0] && (strstr(wname, "HE") || strstr(wname, "Flash")
-            || strstr(wname, "Smoke") || strstr(wname, "Molly")
-            || strstr(wname, "Bomb") || strstr(wname, "Grenade")))
+            || strstr(wname, "Smoke") || strstr(wname, "Bomb") || strstr(wname, "Grenade")))
             return;
 
-        void* params = *(void**)((char*)wc + 0x118);
-        if (!ok_ptr(params))
-            params = *(void**)((char*)wc + Offsets::WC_weaponParams);
-        if (!ok_ptr(params)) return;
+        void* params = nullptr;
+        if (!sread(wc, Offsets::WC_weaponParams, &params) || !ok_ptr(params)) return;
 
         if (params == lastParams && fabsf(pct - lastPct) < 0.5f) return;
         lastParams = params;
@@ -749,21 +804,13 @@ static void apply_recoil(void* localPc) {
 
         auto setf = [](void* base, size_t off, float v) {
             if (!ok_ptr(base)) return;
-            float* f = (float*)((char*)base + off);
-            if (*f == *f && *f >= 0.f && *f <= 8.f) *f = v;
+            @try { *(float*)((char*)base + off) = v; } @catch (...) {}
         };
+        // only known GunParameters multipliers from dump
         setf(params, Offsets::GP_recoilMultCrouch, mul);
         setf(params, Offsets::GP_recoilAimMult, mul);
         setf(params, Offsets::GP_recoilAimCrouch, mul);
-
-        if (pct >= 80.f) {
-            void* rp = *(void**)((char*)params + Offsets::GP_recoilParams);
-            if (ok_ptr(rp)) {
-                setf(rp, Offsets::RP_horiz, 0.05f * mul + 0.01f);
-                setf(rp, Offsets::RP_vert, 0.05f * mul + 0.01f);
-                setf(rp, Offsets::RP_camDev, 0.02f * mul + 0.01f);
-            }
-        }
+        // DO NOT touch RecoilParameters nested pointer — crash source
     } @catch (...) {}
 }
 
@@ -779,14 +826,13 @@ static void run_aim(void* cam, void* camTr) {
 
         apply_recoil(localPc);
 
-        if (!g_aimbot.load()) { g_haveSilent = false; return; }
+        if (!g_aimbot.load() && !g_silent.load()) { g_haveSilent = false; return; }
         if (!ok_ptr(cam) || !ok_ptr(camTr) || !ok_ptr(localPc)) return;
 
-        void* aimCtrl = *(void**)((char*)localPc + Offsets::PC_aimController);
-        if (!ok_ptr(aimCtrl)) return;
-
-        void* aimTr = *(void**)((char*)aimCtrl + Offsets::AC_camTransform);
-        if (!ok_ptr(aimTr)) aimTr = camTr;
+        void* aimCtrl = nullptr;
+        if (!sread(localPc, Offsets::PC_aimController, &aimCtrl) || !ok_ptr(aimCtrl)) return;
+        void* aimTr = nullptr;
+        if (!sread(aimCtrl, Offsets::AC_camTransform, &aimTr) || !ok_ptr(aimTr)) aimTr = camTr;
 
         CGSize scr = g_esp ? g_esp.bounds.size : UIScreen.mainScreen.bounds.size;
         float cx = scr.width * 0.5f, cy = scr.height * 0.5f;
@@ -900,7 +946,7 @@ void CoreUI_FeaturesTick() {
         }
 
         bool wantEsp = g_espBox.load() || g_espSkel.load() || g_espName.load() || g_espDist.load() || g_espHP.load() || g_espWeapon.load() || g_espBomb.load() || g_espGrenade.load();
-        bool wantAim = g_aimbot.load();
+        bool wantAim = g_aimbot.load() || g_silent.load();
         bool wantRec = g_noRecoil.load();
         bool wantFov = g_fovDraw.load();
         if (!wantEsp && !wantAim && !wantRec && !wantFov) return;

@@ -439,57 +439,54 @@ static void rebuildContent() {
         y += row.bounds.size.height + 8;
     };
 
-    if (g_section == 0) { // Aim
+    if (g_section == 0) { // Aim tab
         add(makeSwitch(L("Aim bot","Аимбот"),
-                       L("Automatically aims at enemies","Автоматически наводится на врагов"),
-                       g_aimbot.load(), ^(bool v){ g_aimbot=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Silent","Сайлент"),
-                       L("Hides your aim from other players","Скрывает наводку от других"),
-                       g_silent.load(), ^(bool v){ g_silent=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Visible check","Видимость"),
-                       L("Aim only if visible (no wall)","Aim только если видно"),
-                       g_aimVisible.load(), ^(bool v){ g_aimVisible=v; CoreUI_SaveConfig(); }));
+                       L("Soft aim at enemies","Плавный аим"),
+                       g_aimbot.load(), ^(bool v){ g_aimbot=v; if(v) g_silent=false; CoreUI_SaveConfig(); }));
         add(makeSwitch(L("FOV Circle","Круг FOV"),
-                       L("Shows the aim range circle","Показывает круг зоны аима"),
+                       L("Show FOV (does not block UI)","FOV без блока UI"),
                        g_fovDraw.load(), ^(bool v){ g_fovDraw=v; CoreUI_SaveConfig(); }));
-        add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; }));
-        add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 15, ^(float v){ g_smooth=v; }));
+        add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; CoreUI_SaveConfig(); }));
+        add(makeSlider(L("Smooth","Плавность"), g_smooth.load(), 1, 20, ^(float v){ g_smooth=v; CoreUI_SaveConfig(); }));
         add(makeSegment(L("Bone","Кость"),
-                        g_lang.load()==1 ? @[@"Голова",@"Шея",@"Грудь"] : @[@"Head",@"Neck",@"Chest"],
-                        g_bone.load(), ^(int v){ g_bone=v; }));
+                        @[L("Head","Голова"), L("Neck","Шея"), L("Chest","Грудь")],
+                        g_bone.load(), ^(int v){ g_bone=v; CoreUI_SaveConfig(); }));
     }
-    else if (g_section == 1) { // Visuals
-        add(makeSwitch(L("Box ESP","Бокс ESP"),
-                       L("2D box around players","Рамка вокруг игроков"),
+    else if (g_section == 1) { // Silent tab
+        add(makeSwitch(L("Silent aim","Сайлент"),
+                       L("Instant aim (separate from soft)","Мгновенный аим"),
+                       g_silent.load(), ^(bool v){ g_silent=v; if(v) g_aimbot=false; CoreUI_SaveConfig(); }));
+        add(makeSwitch(L("FOV Circle","Круг FOV"),
+                       L("Show FOV","Показать FOV"),
+                       g_fovDraw.load(), ^(bool v){ g_fovDraw=v; CoreUI_SaveConfig(); }));
+        add(makeSlider(L("FOV","FOV"), g_fov.load(), 1, 30, ^(float v){ g_fov=v; CoreUI_SaveConfig(); }));
+        add(makeSegment(L("Bone","Кость"),
+                        @[L("Head","Голова"), L("Neck","Шея"), L("Chest","Грудь")],
+                        g_bone.load(), ^(int v){ g_bone=v; CoreUI_SaveConfig(); }));
+    }
+    else if (g_section == 2) { // ESP
+        add(makeSwitch(L("Box","Бокс"), L("White box","Белый бокс"),
                        g_espBox.load(), ^(bool v){ g_espBox=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Skeleton","Скелет"),
-                       L("Bone lines","Линии костей"),
+        add(makeSwitch(L("Skeleton","Скелет"), L("Bones","Кости"),
                        g_espSkel.load(), ^(bool v){ g_espSkel=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Names","Ники"),
-                       L("Player name tags","Никнеймы игроков"),
+        add(makeSwitch(L("Name","Имя"), L("Player name","Имя игрока"),
                        g_espName.load(), ^(bool v){ g_espName=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Health bar","Здоровье"),
-                       L("HP bar + percent","Полоска HP + проценты"),
+        add(makeSwitch(L("HP / Armor","ХП / Броня"), L("Bars left of box","Полоски слева"),
                        g_espHP.load(), ^(bool v){ g_espHP=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Weapon","Оружие"),
-                       L("Weapon + ammo under player","Оружие + патроны"),
+        add(makeSwitch(L("Weapon / Ammo","Оружие / Патроны"), L("Under box","Под боксом"),
                        g_espWeapon.load(), ^(bool v){ g_espWeapon=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Bomb","Бомба"),
-                       L("Planted bomb + timer","Бомба + таймер"),
+        add(makeSwitch(L("Bomb + timer","Бомба + таймер"), L("Planted C4","Плантед C4"),
                        g_espBomb.load(), ^(bool v){ g_espBomb=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Grenades","Гранаты"),
-                       L("Flying grenades","Летящие гранаты"),
+        add(makeSwitch(L("Smoke + timer","Смоук + таймер"), L("No molly ESP","Без молика"),
                        g_espGrenade.load(), ^(bool v){ g_espGrenade=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Distance","Дистанция"),
-                       L("Distance in meters","Дистанция в метрах"),
+        add(makeSwitch(L("Distance","Дистанция"), L("Meters","Метры"),
                        g_espDist.load(), ^(bool v){ g_espDist=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Team check","Свои"),
-                       L("Ignore teammates","Игнорировать союзников"),
+        add(makeSwitch(L("Team check","Свои"), L("Ignore teammates","Игнор союзников"),
                        g_espTeam.load(), ^(bool v){ g_espTeam=v; CoreUI_SaveConfig(); }));
     }
-    else if (g_section == 2) { // Misc
+    else if (g_section == 3) { // Misc
         add(makeSwitch(L("No Recoil","Без отдачи"),
-                       L("Enable recoil control","Включить контроль отдачи"),
+                       L("Safe multipliers only","Только множители"),
                        g_noRecoil.load(), ^(bool v){
                            g_noRecoil=v;
                            if (v && g_recoilPct.load() < 1.f) g_recoilPct.store(100.f);
@@ -501,8 +498,8 @@ static void rebuildContent() {
                            if (v >= 1.f) g_noRecoil.store(true);
                            CoreUI_SaveConfig();
                        }));
-        add(makeSwitch(L("Hide from recording","Скрытие записи"),
-                       L("Hide menu & ESP on screenshots/record","Скрыть меню и ESP на скринах"),
+        add(makeSwitch(L("Hide recording","Скрытие записи"),
+                       L("FLAG_SECURE menu/ESP","Скрыть на записи"),
                        g_hideRec.load(), ^(bool v){
                            g_hideRec=v; CoreUI_SaveConfig();
                            UIView* root = g_hostWin ? g_hostWin.rootViewController.view : nil;
@@ -534,8 +531,8 @@ void CoreUI_RebuildMenu(void) {
     // refresh tab titles + accent + content
     if (g_tabBtns) {
         NSArray* titles = g_lang.load()==1
-            ? @[@"Аим", @"Визуалы", @"Разное", @"Конфиг"]
-            : @[@"Aim", @"Visuals", @"Misc", @"Config"];
+            ? @[@"Аим", @"Сайлент", @"ESP", @"Разное", @"Cfg"]
+            : @[@"Aim", @"Silent", @"ESP", @"Misc", @"Cfg"];
         for (int i = 0; i < (int)g_tabBtns.count && i < (int)titles.count; i++) {
             [g_tabBtns[i] setTitle:titles[i] forState:UIControlStateNormal];
             g_tabBtns[i].backgroundColor = (i==g_section) ? Accent() : C(0.1,0.12,0.2,1);
@@ -553,36 +550,57 @@ static void buildPanel(UIView* host) {
 
     CGFloat pw = 340, ph = 420;
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(16, 50, pw, ph)];
-    g_panel.backgroundColor = C(0.04,0.05,0.10,0.96);
-    g_panel.layer.cornerRadius = 16;
-    g_panel.layer.borderWidth = 1.5;
-    g_panel.layer.borderColor = [Accent() colorWithAlphaComponent:0.5].CGColor;
+    g_panel.backgroundColor = C(0.05,0.06,0.10,0.97);
+    g_panel.layer.cornerRadius = 18;
+    g_panel.layer.borderWidth = 1.2;
+    g_panel.layer.borderColor = [Accent() colorWithAlphaComponent:0.55].CGColor;
     g_panel.layer.shadowColor = Accent().CGColor;
-    g_panel.layer.shadowOpacity = 0.35;
-    g_panel.layer.shadowRadius = 16;
+    g_panel.layer.shadowOpacity = 0.45;
+    g_panel.layer.shadowRadius = 20;
     g_panel.clipsToBounds = NO;
+    // gradient wash
+    CAGradientLayer* grad = [CAGradientLayer layer];
+    grad.frame = CGRectMake(0,0,340,420);
+    grad.cornerRadius = 18;
+    grad.colors = @[
+        (id)[Accent() colorWithAlphaComponent:0.22].CGColor,
+        (id)[UIColor colorWithWhite:0.05 alpha:0.95].CGColor,
+        (id)[Accent() colorWithAlphaComponent:0.12].CGColor
+    ];
+    grad.startPoint = CGPointMake(0,0);
+    grad.endPoint = CGPointMake(1,1);
+    [g_panel.layer insertSublayer:grad atIndex:0];
+    // soft shimmer animation
+    CABasicAnimation* sh = [CABasicAnimation animationWithKeyPath:@"locations"];
+    sh.fromValue = @[@0.0, @0.35, @0.7];
+    sh.toValue = @[@0.3, @0.65, @1.0];
+    sh.duration = 3.5;
+    sh.autoreverses = YES;
+    sh.repeatCount = HUGE_VALF;
+    grad.locations = @[@0.0, @0.45, @1.0];
+    [grad addAnimation:sh forKey:@"shim"];
     g_panel.hidden = YES; // always start hidden — open via FAB only
     g_panel.alpha = 0;
 
     // Logo
     UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 28)];
-    logo.text = @"COREUI";
+    logo.text = @"heatfurex";
     logo.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     logo.textColor = Accent();
     [g_panel addSubview:logo];
     UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 120, 14)];
-    sub.text = @"SYSTEM";
+    sub.text = @"ASTRAL";
     sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
     sub.textColor = C(0.3,0.85,1,1);
     [g_panel addSubview:sub];
 
     // Tabs
-    NSArray* titles = @[@"Aim", @"Visuals", @"Misc", @"Config"];
+    NSArray* titles = @[@"Aim", @"Silent", @"ESP", @"Misc", @"Cfg"];
     NSMutableArray* btns = [NSMutableArray array];
-    CGFloat tx = 12, ty = 58;
-    for (int i = 0; i < 4; i++) {
+    CGFloat tx = 8, ty = 58;
+    for (int i = 0; i < 5; i++) {
         UIButton* b = [UIButton buttonWithType:UIButtonTypeSystem];
-        b.frame = CGRectMake(tx, ty, 74, 32);
+        b.frame = CGRectMake(tx, ty, 62, 30);
         [b setTitle:titles[i] forState:UIControlStateNormal];
         [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
         b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
@@ -597,7 +615,7 @@ static void buildPanel(UIView* host) {
         }] forControlEvents:UIControlEventTouchUpInside];
         [g_panel addSubview:b];
         [btns addObject:b];
-        tx += 78;
+        tx += 64;
     }
     g_tabBtns = btns;
 
@@ -652,14 +670,14 @@ static void buildFab(UIView* host) {
     g_fab.layer.cornerRadius = 26;
     g_fab.layer.shadowColor = Accent().CGColor;
     g_fab.layer.shadowOpacity = 0.15;
-    g_fab.alpha = 0.45;
-    g_fab.layer.shadowRadius = 10;
+    g_fab.alpha = 0.92;
+    g_fab.layer.shadowRadius = 12;
+    g_fab.layer.shadowOpacity = 0.4;
     g_fab.userInteractionEnabled = YES;
     UILabel* star = [[UILabel alloc] initWithFrame:g_fab.bounds];
-    star.text = @"·";
-    star.font = [UIFont systemFontOfSize:18];
+    star.text = @"H";
+    star.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     star.textAlignment = NSTextAlignmentCenter;
-    star.font = [UIFont systemFontOfSize:24];
     star.textColor = UIColor.whiteColor;
     star.userInteractionEnabled = NO;
     [g_fab addSubview:star];
