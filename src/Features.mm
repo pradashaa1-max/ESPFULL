@@ -710,8 +710,8 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 sc = w2s(cam, w.pos);
         if (sc.z < 0.05f) continue;
         CGFloat x = sc.x - 3.f;
-        CGFloat y = H - sc.y - 3.f;
-        if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
+        CGFloat y = (Hscr - sc.y) * (Hview / Hscr);
+        if (x < -40 || x > W + 40 || y < -40 || y > Hview + 40) continue;
         // bomb / smoke only — molly ESP removed
         BOOL isSmoke = NO;
         if (!isBomb) {

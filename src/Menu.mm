@@ -279,10 +279,10 @@ static CGFloat FC_BottomInset(UIView* v) {
 static CGRect FC_DrawFrame(UIWindow* key) {
     CGRect b = key && key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
-    CGFloat bot = 34.f;
+    CGFloat bot = 40.f;
     if (@available(iOS 11.0, *)) {
         UIEdgeInsets s = key ? key.safeAreaInsets : UIEdgeInsetsZero;
-        if (s.bottom > 1.f) bot = s.bottom;
+        if (s.bottom > 1.f) bot = s.bottom + 6.f;
     }
     // Leave home-indicator strip on the KEY/game window → gray inactive шторка
     b.size.height = MAX(1.f, b.size.height - bot);
@@ -926,7 +926,7 @@ static void buildFab(UIView* host) {
                 g_hostWin.frame = r;
             }
         } else {
-            g_hostWin.frame = CGRectMake(MAX(16, screen.size.width - 64), 56, 48, 48);
+            g_hostWin.frame = CGRectMake(MAX(16, screen.size.width - 56), 52, 44, 44);
         }
         g_hostWin.userInteractionEnabled = YES;
         g_hostWin.hidden = NO;
