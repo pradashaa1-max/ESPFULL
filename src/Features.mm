@@ -258,7 +258,7 @@ static void refresh(void* camTr) {
         s.weapon[0] = 0;
         // optional extras — never crash match enter
         @try {
-            // HP/Armor from NetworkController @ PC+0x98 → ints 0x90 / 0x94
+            // HP/Armor from NetworkController @ PC+0x88 (network this dump) → ints 0x90 / 0x94
             s.hp = -1.f;
             if (g_espHP.load()) {
                 void* net = *(void**)((char*)pc + Offsets::PC_networkController);
@@ -520,16 +520,16 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat left = mid - wid * 0.5f;
         CGFloat corner = fmaxf(6.f, hgt * 0.22f);
 
-        // Clean green box / cyan skeleton (reference style)
-        UIColor* boxCol = [UIColor colorWithRed:0.15 green:0.95 blue:0.35 alpha:0.95];
-        UIColor* skelCol = [UIColor colorWithRed:0.25 green:0.85 blue:1.0 alpha:0.95];
+        // ESP style: white box + left green HP (reference shot)
+        UIColor* boxCol = [UIColor colorWithWhite:1.0 alpha:0.95];
+        UIColor* skelCol = [UIColor colorWithRed:0.25 green:0.85 blue:1.0 alpha:0.9];
 
         if (box) {
             CGContextSetStrokeColorWithColor(ctx, boxCol.CGColor);
-            CGContextSetLineWidth(ctx, 2.0);
+            CGContextSetLineWidth(ctx, 1.5);
             CGContextStrokeRect(ctx, CGRectMake(left, top, wid, hgt));
-            // soft fill
-            CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:0.15 green:0.95 blue:0.35 alpha:0.06].CGColor);
+            // subtle dark fill
+            CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.12].CGColor);
             CGContextFillRect(ctx, CGRectMake(left, top, wid, hgt));
         }
         if (skel) {
@@ -562,8 +562,8 @@ UIView* g_esp_view(void) { return g_esp; }
         }
         if (hpOn && p.hp >= 0.f) {
             CGFloat barH = hgt;
-            CGFloat barW = 3.f;
-            CGFloat bx = left - 6.f;
+            CGFloat barW = 4.f;
+            CGFloat bx = left - 7.f;
             CGFloat hp = p.hp;
             CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0 alpha:0.45].CGColor);
             CGContextFillRect(ctx, CGRectMake(bx, top, barW, barH));
@@ -582,16 +582,19 @@ UIView* g_esp_view(void) { return g_esp; }
             }
             {
                 NSDictionary* attrs = @{
-                    NSFontAttributeName: [UIFont boldSystemFontOfSize:10],
+                    NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
                     NSForegroundColorAttributeName: UIColor.whiteColor
                 };
                 CGSize sz = [lab sizeWithAttributes:attrs];
-                CGFloat px = mid - (sz.width + 12) * 0.5f;
-                CGFloat py = top - 18;
-                UIBezierPath* pill = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(px, py, sz.width + 12, 15) cornerRadius:4];
-                [[UIColor colorWithRed:0.45 green:0.1 blue:0.75 alpha:0.92] setFill];
-                [pill fill];
-                [lab drawAtPoint:CGPointMake(px + 6, py + 1) withAttributes:attrs];
+                CGFloat px = mid - sz.width * 0.5f;
+                CGFloat py = top - 16;
+                // soft shadow for readability
+                NSDictionary* shadow = @{
+                    NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
+                    NSForegroundColorAttributeName: [UIColor colorWithWhite:0 alpha:0.75]
+                };
+                [lab drawAtPoint:CGPointMake(px + 1, py + 1) withAttributes:shadow];
+                [lab drawAtPoint:CGPointMake(px, py) withAttributes:attrs];
             }
             if (g_espWeapon.load() && (p.weapon[0] || p.ammo >= 0)) {
                 NSString* wpn;
@@ -605,11 +608,13 @@ UIView* g_esp_view(void) { return g_esp; }
                     wpn = [NSString stringWithFormat:@"%s", p.weapon];
                 else
                     wpn = [NSString stringWithFormat:@"%d", p.ammo];
-                [wpn drawAtPoint:CGPointMake(left, bot + 4)
-                  withAttributes:@{
-                      NSFontAttributeName: [UIFont systemFontOfSize:10],
-                      NSForegroundColorAttributeName: [UIColor colorWithRed:0.85 green:0.85 blue:0.4 alpha:1]
-                  }];
+                // weapon under box (SCOUT-style)
+                NSDictionary* wattrs = @{
+                      NSFontAttributeName: [UIFont boldSystemFontOfSize:10],
+                      NSForegroundColorAttributeName: [UIColor colorWithRed:0.95 green:0.95 blue:0.95 alpha:1]
+                  };
+                CGSize wsz = [wpn sizeWithAttributes:wattrs];
+                [wpn drawAtPoint:CGPointMake(mid - wsz.width * 0.5f, bot + 3) withAttributes:wattrs];
             }
             if (p.armor >= 0) {
                 NSString* ar = [NSString stringWithFormat:@"A:%.0f", p.armor];
