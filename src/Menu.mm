@@ -1,4 +1,4 @@
-// Menu.mm — freeze client (from AstralCheat_fixed 20)
+// Menu.mm — CoreUI stealth (from AstralCheat_fixed 20)
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -141,74 +141,32 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
         CGFloat hw = v.bounds.size.width * 0.5;
         CGFloat hh = v.bounds.size.height * 0.5;
         c.x = MAX(hw, MIN(sb.size.width - hw, c.x));
-        c.y = MAX(hh + 8.f, MIN(sb.size.height - hh - 36.f, c.y)); // leave home indicator free
+        c.y = MAX(hh, MIN(sb.size.height - hh, c.y));
         v.center = c;
         [pan setTranslation:CGPointZero inView:v.superview];
     }
 }
 @end
 
-
-
-// Secure field for hide-recording, but does NOT steal touches/edges
-@interface SecurePassField : UITextField @end
-@implementation SecurePassField
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
-    for (UIView* v in self.subviews) {
-        if (v.hidden || v.alpha < 0.05f) continue;
-        // skip internal UITextField chrome
-        if ([NSStringFromClass(v.class) containsString:@"TextField"]) continue;
-        CGPoint lp = [self convertPoint:point toView:v];
-        if (![v pointInside:lp withEvent:event]) continue;
-        // only panel / fab / interactive chrome
-        if (v.userInteractionEnabled) return YES;
-        for (UIView* c in v.subviews) {
-            if (c.hidden || !c.userInteractionEnabled) continue;
-            CGPoint lp2 = [v convertPoint:lp toView:c];
-            if (CGRectContainsPoint(c.bounds, lp2)) return YES;
-        }
-    }
-    return NO;
-}
-- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
-    UIView* h = [super hitTest:point withEvent:event];
-    if (h == self) return nil;
-    return h;
-}
-- (BOOL)canBecomeFirstResponder { return NO; }
-@end
-
-@interface PassThroughView : UIView @end
-@implementation PassThroughView
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
-    for (UIView* v in self.subviews) {
-        if (v.hidden || v.alpha < 0.05f || !v.userInteractionEnabled) continue;
-        CGPoint lp = [self convertPoint:point toView:v];
-        if (CGRectContainsPoint(v.bounds, lp) && [v pointInside:lp withEvent:event])
-            return YES;
-    }
-    return NO;
-}
-- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
-    UIView* h = [super hitTest:point withEvent:event];
-    return (h == self) ? nil : h;
-}
-@end
-
 @interface ACW : UIWindow @end
 @implementation ACW
-// If touch is NOT on panel/FAB — window is invisible to the system (Google + game work).
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        if (@available(iOS 13.0, *))
+            self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        self.backgroundColor = UIColor.clearColor;
+    }
+    return self;
+}
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
-    // Only FAB / open panel. Never own screen edges (home indicator / Control Center).
     extern UIView* g_panel_ref(void);
     extern UIView* g_fab_ref(void);
     UIView* panel = g_panel_ref();
     UIView* fab = g_fab_ref();
     CGFloat H = self.bounds.size.height;
-    CGFloat W = self.bounds.size.width;
-    // system gesture zones — always pass through (шторка / home)
-    if (point.y > H - 40.f) return NO;   // bottom home indicator
-    if (point.y < 12.f) return NO;         // top status / CC swipe
+    if (point.y > H - 36.f) return NO;
+    if (point.y < 10.f) return NO;
     if (panel && !panel.hidden && panel.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:panel];
         if (CGRectContainsPoint(panel.bounds, lp)) return YES;
@@ -217,7 +175,6 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
         CGPoint lp = [self convertPoint:point toView:fab];
         if (CGRectContainsPoint(fab.bounds, lp)) return YES;
     }
-    (void)W;
     return NO;
 }
 - (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
@@ -228,7 +185,6 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     UIView* fab = g_fab_ref();
     if (fab && !fab.hidden) {
         CGPoint lp = [self convertPoint:point toView:fab];
-        // exact fab only — no inset expansion (was causing ghost taps)
         if (CGRectContainsPoint(fab.bounds, lp)) {
             UIView* h = [fab hitTest:lp withEvent:event];
             return h ?: fab;
@@ -241,7 +197,7 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
             return h ?: panel;
         }
     }
-    return nil; // never super — prevents ghost presses
+    return nil;
 }
 - (BOOL)canBecomeKeyWindow { return NO; }
 - (BOOL)canBecomeFirstResponder { return NO; }
@@ -252,14 +208,12 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 - (BOOL)shouldAutorotate { return YES; }
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation { return UIInterfaceOrientationLandscapeRight; }
-// Keep home indicator gray/normal — do NOT defer edges (that makes шторка look "active")
 - (BOOL)prefersHomeIndicatorAutoHidden { return NO; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeNone; }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
-    self.view.userInteractionEnabled = YES;
     if (@available(iOS 13.0, *))
         self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
 }
@@ -281,15 +235,11 @@ static int           g_section = 0;
 static NSArray<UIButton*>* g_tabBtns = nil;
 
 
-// iOS 16: secure full-screen field forces WHITE active home indicator.
-// Leave bottom safe area uncovered → indicator stays gray like without cheat.
 static CGFloat FC_BottomInset(UIView* v) {
     CGFloat inset = 34.f;
     if (@available(iOS 11.0, *)) {
-        UIEdgeInsets s = v.safeAreaInsets;
-        if (s.bottom > 1.f) inset = s.bottom;
+        if (v.safeAreaInsets.bottom > 1.f) inset = v.safeAreaInsets.bottom;
     }
-    if (inset < 20.f) inset = 34.f;
     return inset;
 }
 static CGRect FC_FrameAboveHome(UIView* host) {
@@ -300,7 +250,6 @@ static CGRect FC_FrameAboveHome(UIView* host) {
     b.size.height = MAX(1.f, b.size.height - bot);
     return b;
 }
-
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
 static void applyHideRec(UIView* root) {
     // Overlay root only. Everything (ESP + FAB + panel) goes inside secure
@@ -310,14 +259,14 @@ static void applyHideRec(UIView* root) {
 
     if (on) {
         if (!g_secureField) {
-            g_secureField = [[SecurePassField alloc] initWithFrame:root.bounds];
+            g_secureField = [[UITextField alloc] initWithFrame:FC_FrameAboveHome(root)];
             g_secureField.secureTextEntry = YES;
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         }
-        // CRITICAL iOS 16.5: do NOT cover home-indicator strip (white/active шторка)
-        CGRect safeF = FC_FrameAboveHome(root);
-        g_secureField.frame = safeF;
+        g_secureField.frame = FC_FrameAboveHome(root);
+        // YES so children (menu/fab) can receive touches; ACW.pointInside still
+        // filters to panel/fab only so Google/game are fine.
         g_secureField.userInteractionEnabled = YES;
         if (g_secureField.superview != root)
             [root insertSubview:g_secureField atIndex:0];
@@ -325,17 +274,17 @@ static void applyHideRec(UIView* root) {
         [g_secureField layoutIfNeeded];
         UIView* container = nil;
         for (UIView* s in g_secureField.subviews) {
-            if (s.bounds.size.width >= safeF.size.width * 0.85) {
+            if (s.bounds.size.width >= root.bounds.size.width * 0.9) {
                 container = s; break;
             }
         }
         if (!container) {
-            container = [[PassThroughView alloc] initWithFrame:CGRectMake(0,0,safeF.size.width,safeF.size.height)];
+            container = [[UIView alloc] initWithFrame:root.bounds];
             container.backgroundColor = UIColor.clearColor;
             container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [g_secureField addSubview:container];
         }
-        container.frame = CGRectMake(0,0,safeF.size.width,safeF.size.height);
+        container.frame = CGRectMake(0,0,g_secureField.bounds.size.width,g_secureField.bounds.size.height);
         container.userInteractionEnabled = YES;
         CoreUI_SecureRoot = container;
 
@@ -348,7 +297,7 @@ static void applyHideRec(UIView* root) {
             [g_fab removeFromSuperview];
             [container addSubview:g_fab];
         }
-        // ESP stays on game window (interaction NO) — not moved into overlay
+        // ESP stays on overlay root — not in secure field (Y fix + gray шторка)
 
     } else {
         CoreUI_SecureRoot = nil;
@@ -552,7 +501,7 @@ static void rebuildContent() {
                        g_espWeapon.load(), ^(bool v){ g_espWeapon=v; CoreUI_SaveConfig(); }));
         add(makeSwitch(L("Bomb + timer","Бомба + таймер"), L("Planted C4","Плантед C4"),
                        g_espBomb.load(), ^(bool v){ g_espBomb=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Grenades + timer","Гранаты + таймер"), L("Smoke/HE/Molly/Flash","Все гранаты"),
+        add(makeSwitch(L("Smoke + timer","Смоук + таймер"), L("No molly ESP","Без молика"),
                        g_espGrenade.load(), ^(bool v){ g_espGrenade=v; CoreUI_SaveConfig(); }));
         add(makeSwitch(L("Distance","Дистанция"), L("Meters","Метры"),
                        g_espDist.load(), ^(bool v){ g_espDist=v; CoreUI_SaveConfig(); }));
@@ -658,13 +607,13 @@ static void buildPanel(UIView* host) {
     g_panel.alpha = 0;
 
     // Logo
-    UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, 300, 28)];
+    UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 28)];
     logo.text = @"freeze client";
-    logo.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBlack];
+    logo.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     logo.textColor = Accent();
     [g_panel addSubview:logo];
     UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 120, 14)];
-    sub.text = @"STANDRISE";
+    sub.text = @"ASTRAL";
     sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
     sub.textColor = C(0.3,0.85,1,1);
     [g_panel addSubview:sub];
@@ -740,14 +689,12 @@ static void buildFab(UIView* host) {
     // Visible position: top-right in landscape-ish coords
     CGFloat x = MAX(16, host.bounds.size.width - 70);
     if (x < 20) x = 20;
-    // keep off bottom home-indicator zone
-    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 48, 48, 48)];
+    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 40, 52, 52)];
     g_fab.backgroundColor = Accent();
-    g_fab.layer.cornerRadius = 24;
+    g_fab.layer.cornerRadius = 26;
     g_fab.layer.shadowColor = Accent().CGColor;
     g_fab.layer.shadowOpacity = 0.15;
-    g_fab.alpha = 1.0;
-    g_fab.hidden = NO;
+    g_fab.alpha = 0.92;
     g_fab.layer.shadowRadius = 12;
     g_fab.layer.shadowOpacity = 0.4;
     g_fab.userInteractionEnabled = YES;
@@ -765,7 +712,10 @@ static void buildFab(UIView* host) {
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
     // Drag only after movement — don't kill taps
-    // pan disabled — was source of ghost taps; FAB stays put
+    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:[CoreUIDrag class] action:@selector(onPan:)];
+    pan.maximumNumberOfTouches = 1;
+    pan.cancelsTouchesInView = NO;
+    [g_fab addGestureRecognizer:pan];
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
@@ -812,69 +762,33 @@ static void buildFab(UIView* host) {
     if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
         CGRect f = key.bounds;
         if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
-        // full frame — home indicator handled by pointInside, not by cropping window
         ACW* ov = [[ACW alloc] initWithFrame:f];
-        ov.windowLevel = UIWindowLevelNormal + 5;
+        ov.windowLevel = UIWindowLevelStatusBar + 1;
         ov.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *)) {
             ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-            // REQUIRED or window never appears on iOS 13+
             if (key.windowScene) ov.windowScene = key.windowScene;
         }
-        ACVC* vc = [ACVC new];
-        ov.rootViewController = vc;
-        vc.view.backgroundColor = UIColor.clearColor;
-        vc.view.userInteractionEnabled = YES;
+        ov.rootViewController = [ACVC new];
         ov.userInteractionEnabled = YES;
         ov.hidden = NO;
-        // show without stealing key from game
-        if (@available(iOS 13.0, *)) {
-            // windowScene set above is enough with hidden=NO
-        } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            [ov makeKeyAndVisible];
-            // restore game key if possible
-            [key makeKeyWindow];
-#pragma clang diagnostic pop
-        }
+        // do NOT makeKeyAndVisible
         g_hostWin = ov;
     } else {
-        if (@available(iOS 13.0, *)) {
-            if (key.windowScene && g_hostWin.windowScene != key.windowScene)
-                g_hostWin.windowScene = key.windowScene;
-        }
         g_hostWin.frame = key.bounds;
-        g_hostWin.hidden = NO;
     }
 
     UIView* root = g_hostWin.rootViewController.view;
     root.frame = g_hostWin.bounds;
     root.backgroundColor = UIColor.clearColor;
-    root.userInteractionEnabled = YES;
 
     buildPanel(root);
     buildFab(root);
-    // place FAB on-screen explicitly
-    if (g_fab) {
-        CGFloat W = root.bounds.size.width;
-        if (W < 2) W = UIScreen.mainScreen.bounds.size.width;
-        g_fab.frame = CGRectMake(MAX(16, W - 64), 56, 52, 52);
-        g_fab.hidden = NO;
-        g_fab.alpha = 1.0;
-        [root addSubview:g_fab];
-        [root bringSubviewToFront:g_fab];
-    }
-    if (g_panel) {
-        [root addSubview:g_panel];
-        [root bringSubviewToFront:g_panel];
-    }
-    applyHideRec(root);
+    applyHideRec(root);   // secure + ESP only inside OVERLAY
     CoreUI_EnsureFOVOverlay(g_hostWin);
 
     if (g_panel) [root bringSubviewToFront:g_panel];
     if (g_fab)   [root bringSubviewToFront:g_fab];
-    NSLog(@"[freeze] attach fab=%@ panel=%@ win=%@", g_fab, g_panel, g_hostWin);
 
     if (!g_tick) {
         g_tick = [CADisplayLink displayLinkWithTarget:self selector:@selector(onTick)];
@@ -906,7 +820,9 @@ static void buildFab(UIView* host) {
         }
         // re-home ESP into secure container every tick when hide is on
         if (g_hideRec.load() && CoreUI_SecureRoot) {
-            // ESP remains on game window
+            extern UIView* g_esp_view(void);
+            UIView* esp = g_esp_view();
+            // ESP not in secure
 
             if (g_panel && g_panel.superview != CoreUI_SecureRoot) {
                 [g_panel removeFromSuperview];
@@ -919,21 +835,8 @@ static void buildFab(UIView* host) {
         }
         CoreUI_EnsureFOVOverlay(g_hostWin);
         UIView* front = CoreUI_SecureRoot ?: root;
-        if (g_hostWin) {
-            g_hostWin.hidden = NO;
-            if (@available(iOS 13.0, *))
-                g_hostWin.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-        }
-        if (g_fab) {
-            g_fab.hidden = NO;
-            g_fab.alpha = 1.0;
-            if (g_fab.superview != front) [front addSubview:g_fab];
-            [front bringSubviewToFront:g_fab];
-        }
-        if (g_panel) {
-            if (g_panel.superview != front) [front addSubview:g_panel];
-            [front bringSubviewToFront:g_panel];
-        }
+        if (g_panel) [front bringSubviewToFront:g_panel];
+        if (g_fab)   [front bringSubviewToFront:g_fab];
     }
     CoreUI_FeaturesTick();
 }

@@ -103,11 +103,14 @@ static void* pc_tr(void* pc) {
 static Vec3 w2s(void* cam, Vec3 w) {
     Vec3 o{};
     if (!ok_ptr(cam) || !unity_base()) return o;
-    @try {
-        using F = void (*)(void*, Vec3*, int, Vec3*);
-        R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
-        // Do NOT divide by nativeScale — that made boxes tiny on iPhone
-    } @catch (...) { return Vec3{}; }
+    using F = void (*)(void*, Vec3*, int, Vec3*);
+    R<F>(Offsets::Camera_WorldToScreenPoint_Inj)(cam, &w, 2, &o);
+    UIScreen* sc = [UIScreen mainScreen];
+    float s = (float)sc.nativeScale;
+    if (s < 1.f) s = (float)sc.scale;
+    if (s < 1.f) s = 1.f;
+    o.x /= s;
+    o.y /= s;
     return o;
 }
 
@@ -123,44 +126,6 @@ static bool is_visible(Vec3 from, Vec3 to) {
     return hit.distance >= need;
 }
 
-
-// Accurate player box from BipedMap Head (0x18) + Hip (0x78); fallback root+offsets
-static bool biped_head_feet(void* pc, Vec3* headOut, Vec3* feetOut) {
-    if (!ok_ptr(pc) || !headOut || !feetOut) return false;
-    @try {
-        void* biped = nullptr;
-        if (!sread(pc, Offsets::PC_characterBiped, &biped) || !ok_ptr(biped)) {
-            // try field 0x30 directly already character biped
-            return false;
-        }
-        void* headTr = nullptr;
-        void* hipTr = nullptr;
-        sread(biped, Offsets::Biped_Head, &headTr);
-        sread(biped, Offsets::Biped_Hip, &hipTr);
-        if (ok_ptr(headTr) && ok_ptr(hipTr)) {
-            Vec3 h = get_pos(headTr);
-            Vec3 feet = get_pos(hipTr);
-            if (h.x==h.x && feet.x==feet.x && fabsf(h.y-feet.y) > 0.3f && fabsf(h.y-feet.y) < 3.5f) {
-                *headOut = h;
-                *feetOut = feet;
-                // hip is center pelvis — drop slightly for feet
-                feetOut->y -= 0.15f;
-                return true;
-            }
-        }
-        if (ok_ptr(headTr)) {
-            Vec3 h = get_pos(headTr);
-            if (h.x==h.x) {
-                *headOut = h;
-                *feetOut = h; feetOut->y -= 1.55f;
-                return true;
-            }
-        }
-    } @catch (...) {}
-    return false;
-}
-
-static UIView* g_esp = nil;
 struct PSnap {
     void* obj;
     void* tr;
@@ -169,13 +134,10 @@ struct PSnap {
     bool  local;
     float hp;
     float armor;
-    int   ammo;
-    int   ammoMax;
+    int   ammo;      // current
+    int   ammoMax;   // magazine capacity
     char  name[32];
     char  weapon[24];
-    // frozen screen box (set at refresh) — used while aim/silent so ESP does not stick to crosshair
-    float sx, sy, sh; // feet screen x,y + pixel height
-    bool  hasScr;
 };
 
 struct WorldSnap {
@@ -339,9 +301,7 @@ static void refresh(void* camTr) {
   @try {
     std::vector<PSnap> tmp;
     if (!ok_ptr(camTr)) {
-        std::lock_guard<std::mutex> lk(g_mtx);
-        g_list.swap(tmp);
-        return;
+        return; // keep previous g_list — no flicker
     }
     auto raw = collect_players();
     Vec3 cpos = get_pos(camTr);
@@ -352,26 +312,15 @@ static void refresh(void* camTr) {
     for (void* pc : raw) {
         void* tr = pc_tr(pc);
         if (!ok_ptr(tr)) continue;
-        Vec3 head{}, feet{};
         Vec3 p = get_pos(tr);
-        if (biped_head_feet(pc, &head, &feet)) {
-            p = feet;
-        }
         if (p.x != p.x || fabsf(p.x) > 1e5f) continue;
 
         PSnap s{};
         s.obj = pc;
         s.tr  = tr;
         s.pos = p;
-        // store head delta for box height
-        float headY = 1.55f;
-        if (biped_head_feet(pc, &head, &feet) && head.y > feet.y)
-            headY = head.y - feet.y;
-        if (headY < 0.8f || headY > 2.4f) headY = 1.55f;
         s.team = team_of(pc);
         s.local = is_mine(pc);
-        s.hasScr = false;
-        s.sx = s.sy = s.sh = 0;
         s.hp = -1.f;
         s.armor = -1.f;
         s.ammo = -1;
@@ -402,33 +351,6 @@ static void refresh(void* camTr) {
                 read_str(ns, s.name, sizeof(s.name));
         }
         if (!s.name[0]) snprintf(s.name, sizeof(s.name), "P");
-        // precompute screen box with CURRENT camera (before aim writes this frame)
-        @try {
-            void* cam = main_cam();
-            if (ok_ptr(cam)) {
-                Vec3 feet = s.pos;
-                Vec3 headB{}, feetB{};
-                float hy = 1.55f;
-                if (biped_head_feet(s.obj, &headB, &feetB) && headB.y > feetB.y)
-                    hy = fminf(2.4f, fmaxf(0.8f, headB.y - feetB.y));
-                Vec3 head = {feet.x, feet.y + hy, feet.z};
-                Vec3 sf = w2s(cam, feet);
-                Vec3 sh = w2s(cam, head);
-                if (sf.z >= 0.05f || sh.z >= 0.05f) {
-                    CGFloat H = UIScreen.mainScreen.bounds.size.height;
-                    CGFloat fy = H - sf.y - 3.f;
-                    CGFloat hy = H - sh.y - 3.f;
-                    CGFloat top = fminf(fy, hy), bot = fmaxf(fy, hy);
-                    CGFloat hgt = bot - top;
-                    if (hgt >= 4.f && hgt < H) {
-                        s.sx = (sf.x + sh.x) * 0.5f - 3.f;
-                        s.sy = bot; // feet y in UIKit
-                        s.sh = hgt;
-                        s.hasScr = true;
-                    }
-                }
-            }
-        } @catch (...) {}
         tmp.push_back(s);
     }
     if (mines == 0 && !tmp.empty() && bestD < 5.f)
@@ -541,14 +463,15 @@ static void refresh(void* camTr) {
     }
 
     std::lock_guard<std::mutex> lk(g_mtx);
-    g_list.swap(tmp);
-    // only update world list when we collected; else keep previous (or clear if toggled off)
+    // never replace with empty if we already have players (flicker)
+    if (!tmp.empty() || g_list.empty())
+        g_list.swap(tmp);
     if (doWorld || (!g_espBomb.load() && !g_espGrenade.load())) {
-        g_world.swap(wtmp);
+        if (!wtmp.empty() || g_world.empty() || (!g_espBomb.load() && !g_espGrenade.load()))
+            g_world.swap(wtmp);
     }
   } @catch (...) {
-    std::lock_guard<std::mutex> lk(g_mtx);
-    g_list.clear();
+    // keep last good list — ESP flicker fix
   }
 
 }
@@ -574,7 +497,7 @@ static void draw_corner(CGContextRef ctx, CGFloat l, CGFloat t, CGFloat w, CGFlo
 }
 
 @interface ESPView : UIView @end
-
+static ESPView* g_esp = nil;
 UIView* g_esp_view(void) { return g_esp; }
 
 @implementation ESPView
@@ -621,30 +544,32 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-        // Classic ESP (old working style): root pos + fixed height
+        // Use snapshot pos while aimbot runs — live get_pos jitters with LookAt
         Vec3 feet = p.pos;
-        if (ok_ptr(p.tr)) {
+        if (!g_aimbot.load() && ok_ptr(p.tr)) {
             Vec3 live = get_pos(p.tr);
             if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
         }
-        Vec3 feetWorld = feet;
-        Vec3 headW = {feet.x, feet.y + headY, feet.z};
+        Vec3 head = {feet.x, feet.y + headY, feet.z};
+
         Vec3 sf = w2s(cam, feet);
-        Vec3 shd = w2s(cam, headW);
-        if (sf.z < 0.1f && shd.z < 0.1f) continue;
-        CGFloat fx = sf.x, hx = shd.x;
-        CGFloat fy = H - sf.y, hy = H - shd.y;
-        if ((fx < -100 && hx < -100) || (fx > W+100 && hx > W+100)) continue;
+        Vec3 sh = w2s(cam, head);
+        if (sf.z < 0.05f && sh.z < 0.05f) continue;
+
+        CGFloat fx = sf.x - 3.f;
+        CGFloat hx = sh.x - 3.f;
+        CGFloat fy = H - sf.y - 3.f;
+        CGFloat hy = H - sh.y - 3.f;
+
+        if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
+
         CGFloat top = fminf(fy, hy);
         CGFloat bot = fmaxf(fy, hy);
         CGFloat hgt = bot - top;
-        if (hgt < 12.f) continue;
-        if (hgt > H * 0.9f) continue;
-        CGFloat mid = (fx + hx) * 0.5f;
-        CGFloat wid = hgt * 0.5f;
+        if (hgt < 4.f) continue; // too small / invalid — skip, don't inflate
+        CGFloat mid  = (fx + hx) * 0.5f;
+        CGFloat wid  = hgt * 0.45f;
         CGFloat left = mid - wid * 0.5f;
-        CGFloat hy2 = hy, hx2 = hx, fy2 = fy;
-        hy = hy2; hx = hx2; fy = fy2;
         CGFloat corner = fmaxf(6.f, hgt * 0.22f);
 
         // ESP style: white box + left green HP (reference shot)
@@ -716,7 +641,7 @@ UIView* g_esp_view(void) { return g_esp; }
         if (nameOn || distOn || g_espWeapon.load()) {
             NSMutableString* lab = [NSMutableString stringWithUTF8String:p.name];
             if (distOn) {
-                float d = vdist(feetWorld, cpos);
+                float d = vdist(feet, cpos);
                 [lab appendFormat:@" %.0fm", d];
             }
             {
@@ -783,39 +708,26 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat x = sc.x - 3.f;
         CGFloat y = H - sc.y - 3.f;
         if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
-        // all grenades + bomb
-        BOOL isSmoke = NO, isMolly = NO, isFlash = NO, isHE = NO;
+        // bomb / smoke only — molly ESP removed
+        BOOL isSmoke = NO;
         if (!isBomb) {
             const char* L = w.label;
             if (strcasestr(L, "smoke") || strcasestr(L, "Smoke")) isSmoke = YES;
-            else if (strcasestr(L, "molot") || strcasestr(L, "incendi") || strcasestr(L, "Molly") || strcasestr(L, "Molotov") || strcasestr(L, "fire")) isMolly = YES;
-            else if (strcasestr(L, "flash") || strcasestr(L, "Flash") || strcasestr(L, "stun")) isFlash = YES;
-            else if (strcasestr(L, "HE") || strcasestr(L, "frag") || strcasestr(L, "Frag")) isHE = YES;
+            else continue; // skip molly / other
         }
-        UIColor* col = isBomb ? [UIColor colorWithRed:1 green:0.25 blue:0.1 alpha:1]
-            : isSmoke ? [UIColor colorWithRed:0.75 green:0.75 blue:0.85 alpha:1]
-            : isMolly ? [UIColor colorWithRed:1 green:0.45 blue:0.08 alpha:1]
-            : isFlash ? [UIColor colorWithRed:1 green:1 blue:0.4 alpha:1]
-            : isHE ? [UIColor colorWithRed:1 green:0.3 blue:0.3 alpha:1]
-            : [UIColor colorWithRed:1 green:0.85 blue:0.2 alpha:1];
+        UIColor* col = isBomb
+            ? [UIColor colorWithRed:1 green:0.25 blue:0.1 alpha:1]
+            : [UIColor colorWithRed:0.75 green:0.75 blue:0.8 alpha:1];
         CGContextSetFillColorWithColor(ctx, col.CGColor);
         CGContextFillEllipseInRect(ctx, CGRectMake(x - 6, y - 6, 12, 12));
         // label + timer
         NSString* lab;
         if (w.timer >= 0.f) {
             if (isBomb) lab = [NSString stringWithFormat:@"BOMB %.1fs", w.timer];
-            else if (isSmoke) lab = [NSString stringWithFormat:@"SMOKE %.1fs", w.timer];
-            else if (isMolly) lab = [NSString stringWithFormat:@"MOLLY %.1fs", w.timer];
-            else if (isFlash) lab = [NSString stringWithFormat:@"FLASH %.1fs", w.timer];
-            else if (isHE) lab = [NSString stringWithFormat:@"HE %.1fs", w.timer];
-            else lab = [NSString stringWithFormat:@"%s %.1fs", w.label, w.timer];
+            else lab = [NSString stringWithFormat:@"SMOKE %.1fs", w.timer];
         } else {
             if (isBomb) lab = @"BOMB";
-            else if (isSmoke) lab = @"SMOKE";
-            else if (isMolly) lab = @"MOLLY";
-            else if (isFlash) lab = @"FLASH";
-            else if (isHE) lab = @"HE";
-            else lab = [NSString stringWithUTF8String:w.label];
+            else lab = @"SMOKE";
         }
         NSDictionary* attrs = @{
             NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
@@ -831,44 +743,27 @@ UIView* g_esp_view(void) { return g_esp; }
 @end
 
 void CoreUI_EnsureFOVOverlay(UIWindow* win) {
-    (void)win;
-    // ESP on GAME key window — never on FAB-sized overlay (that killed full-screen ESP)
-    UIWindow* game = nil;
-    for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
-        if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
-            if (w.windowLevel < UIWindowLevelStatusBar && w.isKeyWindow) { game = w; break; }
-            if (!game && w.windowLevel <= UIWindowLevelNormal + 1) game = w;
-        }
-        if (game && game.isKeyWindow) break;
-    }
-    if (!game) {
-        for (UIWindow* w in UIApplication.sharedApplication.windows) {
-            if (w.isKeyWindow) { game = w; break; }
-        }
-    }
-    if (!game) return;
-    UIView* root = game.rootViewController.view ?: (UIView*)game;
+    if (!win) return;
+    // Always on overlay host root — NEVER inside secure UITextField (broke Y + white шторка)
+    UIView* root = win.rootViewController.view ?: (UIView*)win;
     CGRect b = root.bounds;
-    if (b.size.width < 2) b = game.bounds;
+    if (b.size.width < 2) b = win.bounds;
+    if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
-    // full frame — must match W2S screen space or ESP is tiny/offset
     if (!g_esp) {
         g_esp = [[ESPView alloc] initWithFrame:b];
-        g_esp.userInteractionEnabled = NO; // NEVER steal touches
+        g_esp.userInteractionEnabled = NO;
         g_esp.opaque = NO;
         g_esp.backgroundColor = UIColor.clearColor;
         g_esp.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [root addSubview:g_esp];
+        [root insertSubview:g_esp atIndex:0];
     } else {
         g_esp.frame = b;
         if (g_esp.superview != root) {
             [g_esp removeFromSuperview];
-            [root addSubview:g_esp];
+            [root insertSubview:g_esp atIndex:0];
         }
     }
-    // keep under UI but above game GL — still no touches
-    [root insertSubview:g_esp atIndex:0];
 }
 
 // Safe recoil: only 3 float multipliers on WeaponParameters, absolute, once.
@@ -963,13 +858,12 @@ static void run_aim(void* cam, void* camTr) {
             if (p.local) continue;
             if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-            Vec3 bone = {p.pos.x, p.pos.y + boneY, p.pos.z};
-            Vec3 hb{}, fb{};
-            if (biped_head_feet(p.obj, &hb, &fb)) {
-                if (g_bone.load() == 0) bone = hb;
-                else if (g_bone.load() == 1) { bone = hb; bone.y -= 0.2f; }
-                else bone = {fb.x, fb.y + 0.9f, fb.z};
+            Vec3 base = p.pos;
+            if (ok_ptr(p.tr)) {
+                Vec3 live = get_pos(p.tr);
+                if (live.x == live.x && fabsf(live.x) < 1e5f) base = live;
             }
+            Vec3 bone = {base.x, base.y + boneY, base.z};
             float distTo = vdist(cpos, bone);
 
             // Physics.Raycast disabled — was crashing; visible uses simple depth for now
@@ -1014,10 +908,10 @@ static void run_aim(void* cam, void* camTr) {
         while (dy >  180.f) dy -= 360.f;
         while (dy < -180.f) dy += 360.f;
 
-        // Old aim: angles + LookAt
         if (g_silent.load()) {
             *aPitch = pitch;
             *aYaw   = curY + dy;
+            // Silent: force cam transform look (angles alone often ignored by game)
             if (ok_ptr(aimTr) && unity_base()) {
                 Vec3 up{0, 1, 0};
                 using Look = void (*)(void*, Vec3*, Vec3*);
@@ -1026,6 +920,7 @@ static void run_aim(void* cam, void* camTr) {
         } else {
             *aPitch = curP + (pitch - curP) / sm;
             *aYaw   = curY + dy / sm;
+            // soft aim also nudges transform lightly for reliability
             if (ok_ptr(aimTr) && unity_base() && sm <= 3.f) {
                 Vec3 up{0, 1, 0};
                 using Look = void (*)(void*, Vec3*, Vec3*);
