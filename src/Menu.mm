@@ -1,4 +1,4 @@
-// Menu.mm — CoreUI stealth (from AstralCheat_fixed 20)
+// Menu.mm — freeze client (from AstralCheat_fixed 20)
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -141,10 +141,57 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
         CGFloat hw = v.bounds.size.width * 0.5;
         CGFloat hh = v.bounds.size.height * 0.5;
         c.x = MAX(hw, MIN(sb.size.width - hw, c.x));
-        c.y = MAX(hh, MIN(sb.size.height - hh, c.y));
+        c.y = MAX(hh + 8.f, MIN(sb.size.height - hh - 36.f, c.y)); // leave home indicator free
         v.center = c;
         [pan setTranslation:CGPointZero inView:v.superview];
     }
+}
+@end
+
+
+
+// Secure field for hide-recording, but does NOT steal touches/edges
+@interface SecurePassField : UITextField @end
+@implementation SecurePassField
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
+    for (UIView* v in self.subviews) {
+        if (v.hidden || v.alpha < 0.05f) continue;
+        // skip internal UITextField chrome
+        if ([NSStringFromClass(v.class) containsString:@"TextField"]) continue;
+        CGPoint lp = [self convertPoint:point toView:v];
+        if (![v pointInside:lp withEvent:event]) continue;
+        // only panel / fab / interactive chrome
+        if (v.userInteractionEnabled) return YES;
+        for (UIView* c in v.subviews) {
+            if (c.hidden || !c.userInteractionEnabled) continue;
+            CGPoint lp2 = [v convertPoint:lp toView:c];
+            if (CGRectContainsPoint(c.bounds, lp2)) return YES;
+        }
+    }
+    return NO;
+}
+- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
+    UIView* h = [super hitTest:point withEvent:event];
+    if (h == self) return nil;
+    return h;
+}
+- (BOOL)canBecomeFirstResponder { return NO; }
+@end
+
+@interface PassThroughView : UIView @end
+@implementation PassThroughView
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
+    for (UIView* v in self.subviews) {
+        if (v.hidden || v.alpha < 0.05f || !v.userInteractionEnabled) continue;
+        CGPoint lp = [self convertPoint:point toView:v];
+        if (CGRectContainsPoint(v.bounds, lp) && [v pointInside:lp withEvent:event])
+            return YES;
+    }
+    return NO;
+}
+- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
+    UIView* h = [super hitTest:point withEvent:event];
+    return (h == self) ? nil : h;
 }
 @end
 
@@ -152,19 +199,25 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 @implementation ACW
 // If touch is NOT on panel/FAB — window is invisible to the system (Google + game work).
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
+    // Only FAB / open panel. Never own screen edges (home indicator / Control Center).
     extern UIView* g_panel_ref(void);
     extern UIView* g_fab_ref(void);
     UIView* panel = g_panel_ref();
     UIView* fab = g_fab_ref();
+    CGFloat H = self.bounds.size.height;
+    CGFloat W = self.bounds.size.width;
+    // system gesture zones — always pass through (шторка / home)
+    if (point.y > H - 28.f) return NO;   // bottom home indicator
+    if (point.y < 12.f) return NO;         // top status / CC swipe
     if (panel && !panel.hidden && panel.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:panel];
-        if (CGRectContainsPoint(CGRectInset(panel.bounds, -4, -4), lp)) return YES;
+        if (CGRectContainsPoint(panel.bounds, lp)) return YES;
     }
     if (fab && !fab.hidden && fab.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:fab];
-        if (CGRectContainsPoint(CGRectInset(fab.bounds, -10, -10), lp)) return YES;
+        if (CGRectContainsPoint(fab.bounds, lp)) return YES;
     }
-    // everything else passes through to game (Google login, Unity UI)
+    (void)W;
     return NO;
 }
 - (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
@@ -201,9 +254,16 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 - (BOOL)shouldAutorotate { return YES; }
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation { return UIInterfaceOrientationLandscapeRight; }
+// Keep home indicator gray/normal — do NOT defer edges (that makes шторка look "active")
+- (BOOL)prefersHomeIndicatorAutoHidden { return NO; }
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeNone; }
+- (BOOL)prefersStatusBarHidden { return YES; }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
+    self.view.userInteractionEnabled = YES;
+    if (@available(iOS 13.0, *))
+        self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
 }
 @end
 
@@ -231,7 +291,7 @@ static void applyHideRec(UIView* root) {
 
     if (on) {
         if (!g_secureField) {
-            g_secureField = [[UITextField alloc] initWithFrame:root.bounds];
+            g_secureField = [[SecurePassField alloc] initWithFrame:root.bounds];
             g_secureField.secureTextEntry = YES;
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -251,7 +311,7 @@ static void applyHideRec(UIView* root) {
             }
         }
         if (!container) {
-            container = [[UIView alloc] initWithFrame:root.bounds];
+            container = [[PassThroughView alloc] initWithFrame:root.bounds];
             container.backgroundColor = UIColor.clearColor;
             container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [g_secureField addSubview:container];
@@ -477,7 +537,7 @@ static void rebuildContent() {
                        g_espWeapon.load(), ^(bool v){ g_espWeapon=v; CoreUI_SaveConfig(); }));
         add(makeSwitch(L("Bomb + timer","Бомба + таймер"), L("Planted C4","Плантед C4"),
                        g_espBomb.load(), ^(bool v){ g_espBomb=v; CoreUI_SaveConfig(); }));
-        add(makeSwitch(L("Smoke + timer","Смоук + таймер"), L("No molly ESP","Без молика"),
+        add(makeSwitch(L("Grenades + timer","Гранаты + таймер"), L("Smoke/HE/Molly/Flash","Все гранаты"),
                        g_espGrenade.load(), ^(bool v){ g_espGrenade=v; CoreUI_SaveConfig(); }));
         add(makeSwitch(L("Distance","Дистанция"), L("Meters","Метры"),
                        g_espDist.load(), ^(bool v){ g_espDist=v; CoreUI_SaveConfig(); }));
@@ -583,13 +643,13 @@ static void buildPanel(UIView* host) {
     g_panel.alpha = 0;
 
     // Logo
-    UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 28)];
-    logo.text = @"heatfurex";
-    logo.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
+    UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, 300, 28)];
+    logo.text = @"freeze client";
+    logo.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBlack];
     logo.textColor = Accent();
     [g_panel addSubview:logo];
     UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 120, 14)];
-    sub.text = @"ASTRAL";
+    sub.text = @"STANDRISE";
     sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
     sub.textColor = C(0.3,0.85,1,1);
     [g_panel addSubview:sub];
@@ -665,9 +725,10 @@ static void buildFab(UIView* host) {
     // Visible position: top-right in landscape-ish coords
     CGFloat x = MAX(16, host.bounds.size.width - 70);
     if (x < 20) x = 20;
-    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 40, 52, 52)];
+    // keep off bottom home-indicator zone
+    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 48, 48, 48)];
     g_fab.backgroundColor = Accent();
-    g_fab.layer.cornerRadius = 26;
+    g_fab.layer.cornerRadius = 24;
     g_fab.layer.shadowColor = Accent().CGColor;
     g_fab.layer.shadowOpacity = 0.15;
     g_fab.alpha = 0.92;
@@ -675,7 +736,7 @@ static void buildFab(UIView* host) {
     g_fab.layer.shadowOpacity = 0.4;
     g_fab.userInteractionEnabled = YES;
     UILabel* star = [[UILabel alloc] initWithFrame:g_fab.bounds];
-    star.text = @"H";
+    star.text = @"F";
     star.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     star.textAlignment = NSTextAlignmentCenter;
     star.textColor = UIColor.whiteColor;
@@ -739,8 +800,10 @@ static void buildFab(UIView* host) {
         CGRect f = key.bounds;
         if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
         ACW* ov = [[ACW alloc] initWithFrame:f];
-        ov.windowLevel = UIWindowLevelAlert + 50;
+        ov.windowLevel = UIWindowLevelNormal + 3; // above game, far below Alert — home indicator stays normal
         ov.backgroundColor = UIColor.clearColor;
+        if (@available(iOS 13.0, *))
+            ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark; // gray home indicator
         ov.rootViewController = [ACVC new];
         ov.userInteractionEnabled = YES;
         ov.hidden = NO;

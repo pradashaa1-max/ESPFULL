@@ -545,9 +545,9 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-        // Use snapshot pos while aimbot runs — live get_pos jitters with LookAt
+        // Always use snapshot pos when aim/silent — live transform follows LookAt and "swims"
         Vec3 feet = p.pos;
-        if (!g_aimbot.load() && ok_ptr(p.tr)) {
+        if (!g_aimbot.load() && !g_silent.load() && ok_ptr(p.tr)) {
             Vec3 live = get_pos(p.tr);
             if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
         }
@@ -709,26 +709,39 @@ UIView* g_esp_view(void) { return g_esp; }
         CGFloat x = sc.x - 3.f;
         CGFloat y = H - sc.y - 3.f;
         if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
-        // bomb / smoke only — molly ESP removed
-        BOOL isSmoke = NO;
+        // all grenades + bomb
+        BOOL isSmoke = NO, isMolly = NO, isFlash = NO, isHE = NO;
         if (!isBomb) {
             const char* L = w.label;
             if (strcasestr(L, "smoke") || strcasestr(L, "Smoke")) isSmoke = YES;
-            else continue; // skip molly / other
+            else if (strcasestr(L, "molot") || strcasestr(L, "incendi") || strcasestr(L, "Molly") || strcasestr(L, "Molotov") || strcasestr(L, "fire")) isMolly = YES;
+            else if (strcasestr(L, "flash") || strcasestr(L, "Flash") || strcasestr(L, "stun")) isFlash = YES;
+            else if (strcasestr(L, "HE") || strcasestr(L, "frag") || strcasestr(L, "Frag")) isHE = YES;
         }
-        UIColor* col = isBomb
-            ? [UIColor colorWithRed:1 green:0.25 blue:0.1 alpha:1]
-            : [UIColor colorWithRed:0.75 green:0.75 blue:0.8 alpha:1];
+        UIColor* col = isBomb ? [UIColor colorWithRed:1 green:0.25 blue:0.1 alpha:1]
+            : isSmoke ? [UIColor colorWithRed:0.75 green:0.75 blue:0.85 alpha:1]
+            : isMolly ? [UIColor colorWithRed:1 green:0.45 blue:0.08 alpha:1]
+            : isFlash ? [UIColor colorWithRed:1 green:1 blue:0.4 alpha:1]
+            : isHE ? [UIColor colorWithRed:1 green:0.3 blue:0.3 alpha:1]
+            : [UIColor colorWithRed:1 green:0.85 blue:0.2 alpha:1];
         CGContextSetFillColorWithColor(ctx, col.CGColor);
         CGContextFillEllipseInRect(ctx, CGRectMake(x - 6, y - 6, 12, 12));
         // label + timer
         NSString* lab;
         if (w.timer >= 0.f) {
             if (isBomb) lab = [NSString stringWithFormat:@"BOMB %.1fs", w.timer];
-            else lab = [NSString stringWithFormat:@"SMOKE %.1fs", w.timer];
+            else if (isSmoke) lab = [NSString stringWithFormat:@"SMOKE %.1fs", w.timer];
+            else if (isMolly) lab = [NSString stringWithFormat:@"MOLLY %.1fs", w.timer];
+            else if (isFlash) lab = [NSString stringWithFormat:@"FLASH %.1fs", w.timer];
+            else if (isHE) lab = [NSString stringWithFormat:@"HE %.1fs", w.timer];
+            else lab = [NSString stringWithFormat:@"%s %.1fs", w.label, w.timer];
         } else {
             if (isBomb) lab = @"BOMB";
-            else lab = @"SMOKE";
+            else if (isSmoke) lab = @"SMOKE";
+            else if (isMolly) lab = @"MOLLY";
+            else if (isFlash) lab = @"FLASH";
+            else if (isHE) lab = @"HE";
+            else lab = [NSString stringWithUTF8String:w.label];
         }
         NSDictionary* attrs = @{
             NSFontAttributeName: [UIFont boldSystemFontOfSize:11],
