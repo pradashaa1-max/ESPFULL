@@ -226,24 +226,22 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     extern UIView* g_fab_ref(void);
     UIView* panel = g_panel_ref();
     UIView* fab = g_fab_ref();
-    // Prefer FAB button directly
     if (fab && !fab.hidden) {
         CGPoint lp = [self convertPoint:point toView:fab];
-        if (CGRectContainsPoint(CGRectInset(fab.bounds, -12, -12), lp)) {
+        // exact fab only — no inset expansion (was causing ghost taps)
+        if (CGRectContainsPoint(fab.bounds, lp)) {
             UIView* h = [fab hitTest:lp withEvent:event];
-            if (h) return h;
-            return fab;
+            return h ?: fab;
         }
     }
     if (panel && !panel.hidden && panel.alpha > 0.05f) {
         CGPoint lp = [self convertPoint:point toView:panel];
         if (CGRectContainsPoint(panel.bounds, lp)) {
             UIView* h = [panel hitTest:lp withEvent:event];
-            if (h) return h;
-            return panel;
+            return h ?: panel;
         }
     }
-    return [super hitTest:point withEvent:event];
+    return nil; // never super — prevents ghost presses
 }
 - (BOOL)canBecomeKeyWindow { return NO; }
 - (BOOL)canBecomeFirstResponder { return NO; }
@@ -282,6 +280,27 @@ static UITextField*  g_secureField = nil;
 static int           g_section = 0;
 static NSArray<UIButton*>* g_tabBtns = nil;
 
+
+// iOS 16: secure full-screen field forces WHITE active home indicator.
+// Leave bottom safe area uncovered → indicator stays gray like without cheat.
+static CGFloat FC_BottomInset(UIView* v) {
+    CGFloat inset = 34.f;
+    if (@available(iOS 11.0, *)) {
+        UIEdgeInsets s = v.safeAreaInsets;
+        if (s.bottom > 1.f) inset = s.bottom;
+    }
+    if (inset < 20.f) inset = 34.f;
+    return inset;
+}
+static CGRect FC_FrameAboveHome(UIView* host) {
+    CGRect b = host.bounds;
+    if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
+    CGFloat bot = FC_BottomInset(host);
+    b.origin = CGPointZero;
+    b.size.height = MAX(1.f, b.size.height - bot);
+    return b;
+}
+
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
 static void applyHideRec(UIView* root) {
     // Overlay root only. Everything (ESP + FAB + panel) goes inside secure
@@ -296,9 +315,9 @@ static void applyHideRec(UIView* root) {
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         }
-        g_secureField.frame = root.bounds;
-        // YES so children (menu/fab) can receive touches; ACW.pointInside still
-        // filters to panel/fab only so Google/game are fine.
+        // CRITICAL iOS 16.5: do NOT cover home-indicator strip (white/active шторка)
+        CGRect safeF = FC_FrameAboveHome(root);
+        g_secureField.frame = safeF;
         g_secureField.userInteractionEnabled = YES;
         if (g_secureField.superview != root)
             [root insertSubview:g_secureField atIndex:0];
@@ -306,17 +325,17 @@ static void applyHideRec(UIView* root) {
         [g_secureField layoutIfNeeded];
         UIView* container = nil;
         for (UIView* s in g_secureField.subviews) {
-            if (s.bounds.size.width >= root.bounds.size.width * 0.9) {
+            if (s.bounds.size.width >= safeF.size.width * 0.85) {
                 container = s; break;
             }
         }
         if (!container) {
-            container = [[PassThroughView alloc] initWithFrame:root.bounds];
+            container = [[PassThroughView alloc] initWithFrame:CGRectMake(0,0,safeF.size.width,safeF.size.height)];
             container.backgroundColor = UIColor.clearColor;
             container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [g_secureField addSubview:container];
         }
-        container.frame = root.bounds;
+        container.frame = CGRectMake(0,0,safeF.size.width,safeF.size.height);
         container.userInteractionEnabled = YES;
         CoreUI_SecureRoot = container;
 
@@ -799,12 +818,20 @@ static void buildFab(UIView* host) {
     if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
         CGRect f = key.bounds;
         if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
+        // Shrink window height so home indicator belongs to GAME window (gray, not white)
+        CGFloat botPad = 34.f;
+        if (@available(iOS 11.0, *)) {
+            if (key.safeAreaInsets.bottom > 1.f) botPad = key.safeAreaInsets.bottom;
+        }
+        f.size.height = MAX(1.f, f.size.height - botPad);
         ACW* ov = [[ACW alloc] initWithFrame:f];
-        ov.windowLevel = UIWindowLevelNormal + 3; // above game, far below Alert — home indicator stays normal
+        ov.windowLevel = UIWindowLevelNormal + 2;
         ov.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *))
-            ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark; // gray home indicator
+            ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
         ov.rootViewController = [ACVC new];
+        // Root VC view must pass touches through
+        ov.rootViewController.view.backgroundColor = UIColor.clearColor;
         ov.userInteractionEnabled = YES;
         ov.hidden = NO;
         // do NOT makeKeyAndVisible
@@ -845,10 +872,11 @@ static void buildFab(UIView* host) {
         UIView* root = g_hostWin.rootViewController.view;
         // keep secure full-size — interaction MUST stay YES so panel/fab receive touches
         if (g_secureField) {
-            g_secureField.frame = root.bounds;
+            CGRect sf = FC_FrameAboveHome(root);
+            g_secureField.frame = sf;
             g_secureField.userInteractionEnabled = YES;
             if (CoreUI_SecureRoot) {
-                CoreUI_SecureRoot.frame = root.bounds;
+                CoreUI_SecureRoot.frame = CGRectMake(0,0,sf.size.width,sf.size.height);
                 CoreUI_SecureRoot.userInteractionEnabled = YES;
             }
         }

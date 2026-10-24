@@ -763,6 +763,8 @@ void CoreUI_EnsureFOVOverlay(UIWindow* win) {
     CGRect b = host.bounds;
     if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
+    // leave home indicator zone free (iOS 16 white-шторка fix)
+    if (b.size.height > 80.f) b.size.height -= 34.f;
     if (!g_esp) {
         g_esp = [[ESPView alloc] initWithFrame:b];
         g_esp.userInteractionEnabled = NO;
