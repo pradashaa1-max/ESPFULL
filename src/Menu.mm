@@ -348,12 +348,8 @@ static void applyHideRec(UIView* root) {
             [g_fab removeFromSuperview];
             [container addSubview:g_fab];
         }
-        extern UIView* g_esp_view(void);
-        UIView* esp = g_esp_view();
-        if (esp && esp.superview != container) {
-            [esp removeFromSuperview];
-            [container insertSubview:esp atIndex:0];
-        }
+        // ESP stays on game window (interaction NO) — not moved into overlay
+
     } else {
         CoreUI_SecureRoot = nil;
         // Move chrome back to overlay root
@@ -768,12 +764,7 @@ static void buildFab(UIView* host) {
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
     // Drag only after movement — don't kill taps
-    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:[CoreUIDrag class] action:@selector(onPan:)];
-    pan.maximumNumberOfTouches = 1;
-    pan.cancelsTouchesInView = NO;
-    pan.delaysTouchesBegan = NO;
-    pan.delaysTouchesEnded = NO;
-    [g_fab addGestureRecognizer:pan];
+    // pan disabled — was source of ghost taps; FAB stays put
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
@@ -884,12 +875,8 @@ static void buildFab(UIView* host) {
         }
         // re-home ESP into secure container every tick when hide is on
         if (g_hideRec.load() && CoreUI_SecureRoot) {
-            extern UIView* g_esp_view(void);
-            UIView* esp = g_esp_view();
-            if (esp && esp.superview != CoreUI_SecureRoot) {
-                [esp removeFromSuperview];
-                [CoreUI_SecureRoot insertSubview:esp atIndex:0];
-            }
+            // ESP remains on game window
+
             if (g_panel && g_panel.superview != CoreUI_SecureRoot) {
                 [g_panel removeFromSuperview];
                 [CoreUI_SecureRoot addSubview:g_panel];
@@ -903,6 +890,36 @@ static void buildFab(UIView* host) {
         UIView* front = CoreUI_SecureRoot ?: root;
         if (g_panel) [front bringSubviewToFront:g_panel];
         if (g_fab)   [front bringSubviewToFront:g_fab];
+
+        // MAX touch isolation (iOS 16): when menu closed, window frame = FAB only
+        // so nothing else can receive/ghost-tap. ESP is interactionEnabled=NO.
+        if (g_hostWin && g_fab) {
+            UIWindow* key = nil;
+            for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
+                if (![sc isKindOfClass:UIWindowScene.class]) continue;
+                for (UIWindow* w in ((UIWindowScene*)sc).windows) {
+                    if (w != g_hostWin && w.isKeyWindow) { key = w; break; }
+                }
+                if (key) break;
+            }
+            CGRect screen = key ? key.bounds : UIScreen.mainScreen.bounds;
+            BOOL menuOpen = g_panel && !g_panel.hidden && g_panel.alpha > 0.05f;
+            if (menuOpen && g_panel) {
+                CGRect pr = [g_fab.superview convertRect:g_panel.frame toView:nil];
+                CGRect fr = [g_fab.superview convertRect:g_fab.frame toView:nil];
+                CGRect u = CGRectUnion(pr, fr);
+                u = CGRectInset(u, -8, -8);
+                // keep off home indicator
+                if (u.origin.y + u.size.height > screen.size.height - 40)
+                    u.size.height = MAX(1, screen.size.height - 40 - u.origin.y);
+                g_hostWin.frame = u;
+            } else {
+                CGRect fr = [g_fab.superview convertRect:g_fab.frame toView:nil];
+                if (fr.size.width < 1) fr = g_fab.frame;
+                fr = CGRectInset(fr, -2, -2);
+                g_hostWin.frame = fr;
+            }
+        }
     }
     CoreUI_FeaturesTick();
 }

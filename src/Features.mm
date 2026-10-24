@@ -126,6 +126,43 @@ static bool is_visible(Vec3 from, Vec3 to) {
     return hit.distance >= need;
 }
 
+
+// Accurate player box from BipedMap Head (0x18) + Hip (0x78); fallback root+offsets
+static bool biped_head_feet(void* pc, Vec3* headOut, Vec3* feetOut) {
+    if (!ok_ptr(pc) || !headOut || !feetOut) return false;
+    @try {
+        void* biped = nullptr;
+        if (!sread(pc, Offsets::PC_characterBiped, &biped) || !ok_ptr(biped)) {
+            // try field 0x30 directly already character biped
+            return false;
+        }
+        void* headTr = nullptr;
+        void* hipTr = nullptr;
+        sread(biped, Offsets::Biped_Head, &headTr);
+        sread(biped, Offsets::Biped_Hip, &hipTr);
+        if (ok_ptr(headTr) && ok_ptr(hipTr)) {
+            Vec3 h = get_pos(headTr);
+            Vec3 feet = get_pos(hipTr);
+            if (h.x==h.x && feet.x==feet.x && fabsf(h.y-feet.y) > 0.3f && fabsf(h.y-feet.y) < 3.5f) {
+                *headOut = h;
+                *feetOut = feet;
+                // hip is center pelvis — drop slightly for feet
+                feetOut->y -= 0.15f;
+                return true;
+            }
+        }
+        if (ok_ptr(headTr)) {
+            Vec3 h = get_pos(headTr);
+            if (h.x==h.x) {
+                *headOut = h;
+                *feetOut = h; feetOut->y -= 1.55f;
+                return true;
+            }
+        }
+    } @catch (...) {}
+    return false;
+}
+
 struct PSnap {
     void* obj;
     void* tr;
@@ -317,13 +354,22 @@ static void refresh(void* camTr) {
     for (void* pc : raw) {
         void* tr = pc_tr(pc);
         if (!ok_ptr(tr)) continue;
+        Vec3 head{}, feet{};
         Vec3 p = get_pos(tr);
+        if (biped_head_feet(pc, &head, &feet)) {
+            p = feet;
+        }
         if (p.x != p.x || fabsf(p.x) > 1e5f) continue;
 
         PSnap s{};
         s.obj = pc;
         s.tr  = tr;
         s.pos = p;
+        // store head delta for box height
+        float headY = 1.55f;
+        if (biped_head_feet(pc, &head, &feet) && head.y > feet.y)
+            headY = head.y - feet.y;
+        if (headY < 0.8f || headY > 2.4f) headY = 1.55f;
         s.team = team_of(pc);
         s.local = is_mine(pc);
         s.hasScr = false;
@@ -363,7 +409,11 @@ static void refresh(void* camTr) {
             void* cam = main_cam();
             if (ok_ptr(cam)) {
                 Vec3 feet = s.pos;
-                Vec3 head = {feet.x, feet.y + 1.55f, feet.z};
+                Vec3 headB{}, feetB{};
+                float hy = 1.55f;
+                if (biped_head_feet(s.obj, &headB, &feetB) && headB.y > feetB.y)
+                    hy = fminf(2.4f, fmaxf(0.8f, headB.y - feetB.y));
+                Vec3 head = {feet.x, feet.y + hy, feet.z};
                 Vec3 sf = w2s(cam, feet);
                 Vec3 sh = w2s(cam, head);
                 if (sf.z >= 0.05f || sh.z >= 0.05f) {
@@ -573,8 +623,9 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-        CGFloat top, bot, hgt, mid, wid, left, hy, hx;
-        // Aim/silent: use FROZEN screen box from refresh — never re-w2s (that sticks ESP to crosshair)
+        CGFloat top=0, bot=0, hgt=0, mid=0, wid=0, left=0, hy=0, hx=0, fy=0;
+        Vec3 feetWorld = p.pos; // for distance label
+        // Aim/silent: frozen screen box — ESP stays on player, not crosshair
         if ((g_aimbot.load() || g_silent.load()) && p.hasScr) {
             bot = p.sy;
             hgt = p.sh;
@@ -584,20 +635,27 @@ UIView* g_esp_view(void) { return g_esp; }
             left = mid - wid * 0.5f;
             hy = top;
             hx = mid;
+            fy = bot;
             if (hgt < 4.f) continue;
         } else {
-            Vec3 feet = p.pos;
-            if (ok_ptr(p.tr)) {
+            Vec3 feet = p.pos, headW{};
+            Vec3 hb{}, fb{};
+            if (biped_head_feet(p.obj, &hb, &fb)) {
+                feet = fb; headW = hb;
+            } else if (ok_ptr(p.tr)) {
                 Vec3 live = get_pos(p.tr);
                 if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
+                headW = {feet.x, feet.y + headY, feet.z};
+            } else {
+                headW = {feet.x, feet.y + headY, feet.z};
             }
-            Vec3 head = {feet.x, feet.y + headY, feet.z};
+            feetWorld = feet;
             Vec3 sf = w2s(cam, feet);
-            Vec3 shd = w2s(cam, head);
+            Vec3 shd = w2s(cam, headW);
             if (sf.z < 0.05f && shd.z < 0.05f) continue;
             CGFloat fx = sf.x - 3.f;
             hx = shd.x - 3.f;
-            CGFloat fy = H - sf.y - 3.f;
+            fy = H - sf.y - 3.f;
             hy = H - shd.y - 3.f;
             if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
             top = fminf(fy, hy);
@@ -679,7 +737,7 @@ UIView* g_esp_view(void) { return g_esp; }
         if (nameOn || distOn || g_espWeapon.load()) {
             NSMutableString* lab = [NSMutableString stringWithUTF8String:p.name];
             if (distOn) {
-                float d = vdist(feet, cpos);
+                float d = vdist(feetWorld, cpos);
                 [lab appendFormat:@" %.0fm", d];
             }
             {
@@ -794,17 +852,31 @@ UIView* g_esp_view(void) { return g_esp; }
 @end
 
 void CoreUI_EnsureFOVOverlay(UIWindow* win) {
-    if (!win) return;
-    UIView* host = win.rootViewController.view ?: (UIView*)win;
-    UIView* root = CoreUI_SecureRoot ?: host;
-    CGRect b = host.bounds;
-    if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
+    (void)win;
+    // ESP on GAME key window — never on FAB-sized overlay (that killed full-screen ESP)
+    UIWindow* game = nil;
+    for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
+            if (w.windowLevel < UIWindowLevelStatusBar && w.isKeyWindow) { game = w; break; }
+            if (!game && w.windowLevel <= UIWindowLevelNormal + 1) game = w;
+        }
+        if (game && game.isKeyWindow) break;
+    }
+    if (!game) {
+        for (UIWindow* w in UIApplication.sharedApplication.windows) {
+            if (w.isKeyWindow) { game = w; break; }
+        }
+    }
+    if (!game) return;
+    UIView* root = game.rootViewController.view ?: (UIView*)game;
+    CGRect b = root.bounds;
+    if (b.size.width < 2) b = game.bounds;
     b.origin = CGPointZero;
-    // leave home indicator zone free (iOS 16 white-шторка fix)
-    if (b.size.height > 80.f) b.size.height -= 34.f;
+    if (b.size.height > 80.f) b.size.height -= 34.f; // home indicator free
     if (!g_esp) {
         g_esp = [[ESPView alloc] initWithFrame:b];
-        g_esp.userInteractionEnabled = NO;
+        g_esp.userInteractionEnabled = NO; // NEVER steal touches
         g_esp.opaque = NO;
         g_esp.backgroundColor = UIColor.clearColor;
         g_esp.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -816,6 +888,8 @@ void CoreUI_EnsureFOVOverlay(UIWindow* win) {
             [root addSubview:g_esp];
         }
     }
+    // keep under UI but above game GL — still no touches
+    [root insertSubview:g_esp atIndex:0];
 }
 
 // Safe recoil: only 3 float multipliers on WeaponParameters, absolute, once.
@@ -910,8 +984,13 @@ static void run_aim(void* cam, void* camTr) {
             if (p.local) continue;
             if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-            Vec3 base = p.pos; // snapshot only — live pos follows aim and breaks ESP
-            Vec3 bone = {base.x, base.y + boneY, base.z};
+            Vec3 bone = {p.pos.x, p.pos.y + boneY, p.pos.z};
+            Vec3 hb{}, fb{};
+            if (biped_head_feet(p.obj, &hb, &fb)) {
+                if (g_bone.load() == 0) bone = hb;
+                else if (g_bone.load() == 1) { bone = hb; bone.y -= 0.2f; }
+                else bone = {fb.x, fb.y + 0.9f, fb.z};
+            }
             float distTo = vdist(cpos, bone);
 
             // Physics.Raycast disabled — was crashing; visible uses simple depth for now
