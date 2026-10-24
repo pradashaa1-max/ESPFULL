@@ -743,25 +743,14 @@ UIView* g_esp_view(void) { return g_esp; }
 @end
 
 void CoreUI_EnsureFOVOverlay(UIWindow* win) {
-    (void)win;
-    // ESP on GAME key window (full screen). Overlay host is FAB-sized only — no taps/шторка.
-    UIWindow* game = nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    game = UIApplication.sharedApplication.keyWindow;
-#pragma clang diagnostic pop
-    for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
-        if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
-            if (w.windowLevel <= UIWindowLevelNormal + 1 && w.isKeyWindow) { game = w; break; }
-            if (!game && w.windowLevel <= UIWindowLevelNormal) game = w;
-        }
-        if (game && game.isKeyWindow) break;
-    }
-    if (!game) return;
-    UIView* root = game.rootViewController.view ?: (UIView*)game;
+    // Prefer secure root when hide-rec ON so ESP is hidden from screenshots/record
+    UIView* root = nil;
+    if (CoreUI_SecureRoot) root = CoreUI_SecureRoot;
+    else if (win) root = win.rootViewController.view ?: (UIView*)win;
+    if (!root) return;
     CGRect b = root.bounds;
-    if (b.size.width < 2) b = game.bounds;
+    if (b.size.width < 2 && win) b = win.bounds;
+    if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
     if (!g_esp) {
         g_esp = [[ESPView alloc] initWithFrame:b];
