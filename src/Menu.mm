@@ -746,7 +746,8 @@ static void buildFab(UIView* host) {
     g_fab.layer.cornerRadius = 24;
     g_fab.layer.shadowColor = Accent().CGColor;
     g_fab.layer.shadowOpacity = 0.15;
-    g_fab.alpha = 0.92;
+    g_fab.alpha = 1.0;
+    g_fab.hidden = NO;
     g_fab.layer.shadowRadius = 12;
     g_fab.layer.shadowOpacity = 0.4;
     g_fab.userInteractionEnabled = YES;
@@ -811,39 +812,69 @@ static void buildFab(UIView* host) {
     if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
         CGRect f = key.bounds;
         if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
-        // Shrink window height so home indicator belongs to GAME window (gray, not white)
-        CGFloat botPad = 34.f;
-        if (@available(iOS 11.0, *)) {
-            if (key.safeAreaInsets.bottom > 1.f) botPad = key.safeAreaInsets.bottom;
-        }
-        f.size.height = MAX(1.f, f.size.height - botPad);
+        // full frame — home indicator handled by pointInside, not by cropping window
         ACW* ov = [[ACW alloc] initWithFrame:f];
-        ov.windowLevel = UIWindowLevelNormal + 2;
+        ov.windowLevel = UIWindowLevelAlert; // visible above Unity
         ov.backgroundColor = UIColor.clearColor;
-        if (@available(iOS 13.0, *))
+        if (@available(iOS 13.0, *)) {
             ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-        ov.rootViewController = [ACVC new];
-        // Root VC view must pass touches through
-        ov.rootViewController.view.backgroundColor = UIColor.clearColor;
+            // REQUIRED or window never appears on iOS 13+
+            if (key.windowScene) ov.windowScene = key.windowScene;
+        }
+        ACVC* vc = [ACVC new];
+        ov.rootViewController = vc;
+        vc.view.backgroundColor = UIColor.clearColor;
+        vc.view.userInteractionEnabled = YES;
         ov.userInteractionEnabled = YES;
         ov.hidden = NO;
-        // do NOT makeKeyAndVisible
+        // show without stealing key from game
+        if (@available(iOS 13.0, *)) {
+            // windowScene set above is enough with hidden=NO
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [ov makeKeyAndVisible];
+            // restore game key if possible
+            [key makeKeyWindow];
+#pragma clang diagnostic pop
+        }
         g_hostWin = ov;
     } else {
+        if (@available(iOS 13.0, *)) {
+            if (key.windowScene && g_hostWin.windowScene != key.windowScene)
+                g_hostWin.windowScene = key.windowScene;
+        }
         g_hostWin.frame = key.bounds;
+        g_hostWin.hidden = NO;
     }
 
     UIView* root = g_hostWin.rootViewController.view;
     root.frame = g_hostWin.bounds;
     root.backgroundColor = UIColor.clearColor;
+    root.userInteractionEnabled = YES;
 
     buildPanel(root);
     buildFab(root);
-    applyHideRec(root);   // secure + ESP only inside OVERLAY
+    // place FAB on-screen explicitly
+    if (g_fab) {
+        CGFloat W = root.bounds.size.width;
+        if (W < 2) W = UIScreen.mainScreen.bounds.size.width;
+        g_fab.frame = CGRectMake(MAX(16, W - 64), 56, 52, 52);
+        g_fab.hidden = NO;
+        g_fab.alpha = 1.0;
+        [root addSubview:g_fab];
+        [root bringSubviewToFront:g_fab];
+    }
+    if (g_panel) {
+        [root addSubview:g_panel];
+        [root bringSubviewToFront:g_panel];
+    }
+    applyHideRec(root);
     CoreUI_EnsureFOVOverlay(g_hostWin);
 
     if (g_panel) [root bringSubviewToFront:g_panel];
     if (g_fab)   [root bringSubviewToFront:g_fab];
+    NSLog(@"[freeze] attach fab=%@ panel=%@ win=%@", g_fab, g_panel, g_hostWin);
 
     if (!g_tick) {
         g_tick = [CADisplayLink displayLinkWithTarget:self selector:@selector(onTick)];
@@ -888,37 +919,16 @@ static void buildFab(UIView* host) {
         }
         CoreUI_EnsureFOVOverlay(g_hostWin);
         UIView* front = CoreUI_SecureRoot ?: root;
-        if (g_panel) [front bringSubviewToFront:g_panel];
-        if (g_fab)   [front bringSubviewToFront:g_fab];
-
-        // MAX touch isolation (iOS 16): when menu closed, window frame = FAB only
-        // so nothing else can receive/ghost-tap. ESP is interactionEnabled=NO.
-        if (g_hostWin && g_fab) {
-            UIWindow* key = nil;
-            for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
-                if (![sc isKindOfClass:UIWindowScene.class]) continue;
-                for (UIWindow* w in ((UIWindowScene*)sc).windows) {
-                    if (w != g_hostWin && w.isKeyWindow) { key = w; break; }
-                }
-                if (key) break;
-            }
-            CGRect screen = key ? key.bounds : UIScreen.mainScreen.bounds;
-            BOOL menuOpen = g_panel && !g_panel.hidden && g_panel.alpha > 0.05f;
-            if (menuOpen && g_panel) {
-                CGRect pr = [g_fab.superview convertRect:g_panel.frame toView:nil];
-                CGRect fr = [g_fab.superview convertRect:g_fab.frame toView:nil];
-                CGRect u = CGRectUnion(pr, fr);
-                u = CGRectInset(u, -8, -8);
-                // keep off home indicator
-                if (u.origin.y + u.size.height > screen.size.height - 40)
-                    u.size.height = MAX(1, screen.size.height - 40 - u.origin.y);
-                g_hostWin.frame = u;
-            } else {
-                CGRect fr = [g_fab.superview convertRect:g_fab.frame toView:nil];
-                if (fr.size.width < 1) fr = g_fab.frame;
-                fr = CGRectInset(fr, -2, -2);
-                g_hostWin.frame = fr;
-            }
+        if (g_hostWin) g_hostWin.hidden = NO;
+        if (g_fab) {
+            g_fab.hidden = NO;
+            g_fab.alpha = 1.0;
+            if (g_fab.superview != front) [front addSubview:g_fab];
+            [front bringSubviewToFront:g_fab];
+        }
+        if (g_panel) {
+            if (g_panel.superview != front) [front addSubview:g_panel];
+            [front bringSubviewToFront:g_panel];
         }
     }
     CoreUI_FeaturesTick();
