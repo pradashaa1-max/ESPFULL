@@ -505,12 +505,15 @@ UIView* g_esp_view(void) { return g_esp; }
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (!ctx) return;
     CGFloat W = self.bounds.size.width;
-    CGFloat H = self.bounds.size.height;
-    if (W < 2 || H < 2) return;
+    CGFloat Hview = self.bounds.size.height;
+    if (W < 2 || Hview < 2) return;
+    // View omits home strip; W2S uses full screen — map Y into this view
+    CGFloat Hscr = UIScreen.mainScreen.bounds.size.height;
+    if (Hscr < 2) Hscr = Hview;
 
     if (g_fovDraw.load() && (g_aimbot.load() || g_silent.load())) {
-        CGFloat cx = W * 0.5f, cy = H * 0.5f;
-        CGFloat side = W < H ? W : H;
+        CGFloat cx = W * 0.5f, cy = Hview * 0.5f;
+        CGFloat side = W < Hview ? W : Hview;
         CGFloat r = side * (0.04f + g_fov.load() / 30.f * 0.20f);
         CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.2 green:0.6 blue:1 alpha:1].CGColor);
         CGContextSetLineWidth(ctx, 2);
@@ -558,8 +561,9 @@ UIView* g_esp_view(void) { return g_esp; }
 
         CGFloat fx = sf.x - 3.f;
         CGFloat hx = sh.x - 3.f;
-        CGFloat fy = H - sf.y - 3.f;
-        CGFloat hy = H - sh.y - 3.f;
+        // top-aligned view: screen Y → view Y (no upward drift)
+        CGFloat fy = (Hscr - sf.y) * (Hview / Hscr);
+        CGFloat hy = (Hscr - sh.y) * (Hview / Hscr);
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
@@ -746,8 +750,8 @@ void CoreUI_EnsureFOVOverlay(UIWindow* win) {
     if (!win) return;
     UIView* root = CoreUI_SecureRoot;
     if (!root) root = win.rootViewController.view ?: (UIView*)win;
-    // ALWAYS full screen size matching UIScreen so W2S Y is correct
-    CGRect b = UIScreen.mainScreen.bounds;
+    CGRect b = root.bounds;
+    if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
     if (!g_esp) {
         g_esp = [[ESPView alloc] initWithFrame:b];

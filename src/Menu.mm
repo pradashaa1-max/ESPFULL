@@ -275,11 +275,31 @@ static CGFloat FC_BottomInset(UIView* v) {
     }
     return inset;
 }
+
+static CGRect FC_DrawFrame(UIWindow* key) {
+    CGRect b = key && key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
+    b.origin = CGPointZero;
+    CGFloat bot = 34.f;
+    if (@available(iOS 11.0, *)) {
+        UIEdgeInsets s = key ? key.safeAreaInsets : UIEdgeInsetsZero;
+        if (s.bottom > 1.f) bot = s.bottom;
+    }
+    // Leave home-indicator strip on the KEY/game window → gray inactive шторка
+    b.size.height = MAX(1.f, b.size.height - bot);
+    return b;
+}
+
 static CGRect FC_FrameAboveHome(UIView* host) {
-    // Full frame for correct ESP Y (cropping caused boxes to go up)
     CGRect b = host.bounds;
     if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
+    // match draw window: no cover home indicator
+    CGFloat bot = 34.f;
+    if (@available(iOS 11.0, *)) {
+        if (host.safeAreaInsets.bottom > 1.f) bot = host.safeAreaInsets.bottom;
+    }
+    if (b.size.height > bot + 80.f)
+        b.size.height -= bot;
     return b;
 }
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
@@ -299,7 +319,7 @@ static void applyHideRec(UIView* root) {
         g_secureField.frame = FC_FrameAboveHome(root);
         // YES so children (menu/fab) can receive touches; ACW.pointInside still
         // filters to panel/fab only so Google/game are fine.
-        g_secureField.userInteractionEnabled = YES;
+        g_secureField.userInteractionEnabled = NO; // draw window never takes taps
         if (g_secureField.superview != root)
             [root insertSubview:g_secureField atIndex:0];
 
@@ -317,23 +337,15 @@ static void applyHideRec(UIView* root) {
             [g_secureField addSubview:container];
         }
         container.frame = CGRectMake(0,0,g_secureField.bounds.size.width,g_secureField.bounds.size.height);
-        container.userInteractionEnabled = YES;
+        container.userInteractionEnabled = NO;
         CoreUI_SecureRoot = container;
 
-        // Move panel + FAB + ESP into secure container → hidden on recording
-        if (g_panel && g_panel.superview != container) {
-            [g_panel removeFromSuperview];
-            [container addSubview:g_panel];
-        }
-        if (g_fab && g_fab.superview != container) {
-            [g_fab removeFromSuperview];
-            [container addSubview:g_fab];
-        }
-        // ESP must be inside secure for hide-recording
+        // Only ESP in secure (panel/FAB on ctrl window — no taps from draw)
         extern UIView* g_esp_view(void);
         UIView* esp = g_esp_view();
         if (esp && esp.superview != container) {
             [esp removeFromSuperview];
+            esp.userInteractionEnabled = NO;
             [container insertSubview:esp atIndex:0];
         }
 
@@ -807,22 +819,24 @@ static void buildFab(UIView* host) {
     }
 
     // DRAW window: full screen, interaction OFF — hide-rec + ESP, zero taps
-    if (!g_drawWin || ![g_drawWin isKindOfClass:[ACW class]]) {
-        CGRect f = key.bounds;
-        if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
-        ACW* dw = [[ACW alloc] initWithFrame:f];
-        dw.windowLevel = UIWindowLevelStatusBar;
+    if (!g_drawWin) {
+        CGRect f = FC_DrawFrame(key);
+        UIWindow* dw = [[UIWindow alloc] initWithFrame:f];
+        dw.windowLevel = UIWindowLevelNormal + 1; // below ctrl, above game
         dw.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *)) {
             dw.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
             if (key.windowScene) dw.windowScene = key.windowScene;
         }
-        dw.rootViewController = [ACVC new];
-        dw.userInteractionEnabled = NO; // CRITICAL: cannot steal taps
+        UIViewController* dvc = [UIViewController new];
+        dvc.view.backgroundColor = UIColor.clearColor;
+        dvc.view.userInteractionEnabled = NO;
+        dw.rootViewController = dvc;
+        dw.userInteractionEnabled = NO; // NEVER receives taps
         dw.hidden = NO;
         g_drawWin = dw;
     } else {
-        g_drawWin.frame = key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
+        g_drawWin.frame = FC_DrawFrame(key);
         g_drawWin.userInteractionEnabled = NO;
         g_drawWin.hidden = NO;
     }
@@ -880,28 +894,54 @@ static void buildFab(UIView* host) {
 + (void)onTick {
     UIWindow* key = [self gameWindow];
     if (g_drawWin) {
-        CGRect b = key && key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
-        g_drawWin.frame = b;
+        g_drawWin.frame = FC_DrawFrame(key);
         g_drawWin.userInteractionEnabled = NO;
         g_drawWin.hidden = NO;
-        if (g_drawWin.rootViewController.view)
+        if (g_drawWin.rootViewController.view) {
+            g_drawWin.rootViewController.view.userInteractionEnabled = NO;
             g_drawWin.rootViewController.view.frame = g_drawWin.bounds;
+        }
+        if (g_secureField) g_secureField.userInteractionEnabled = NO;
+        if (CoreUI_SecureRoot) CoreUI_SecureRoot.userInteractionEnabled = NO;
         if (g_hideRec.load())
             applyHideRec(g_drawWin.rootViewController.view);
         CoreUI_EnsureFOVOverlay(g_drawWin);
+        extern UIView* g_esp_view(void);
+        UIView* esp = g_esp_view();
+        if (esp) esp.userInteractionEnabled = NO;
     }
-    if (g_hostWin && g_fab) {
-        BOOL open = g_panel && !g_panel.hidden && g_panel.alpha > 0.05f;
-        if (!open) {
-            CGFloat W = UIScreen.mainScreen.bounds.size.width;
-            CGRect fr = CGRectMake(MAX(16, W - 64), 56, 52, 52);
-            if (!CGRectEqualToRect(g_hostWin.frame, fr))
-                g_hostWin.frame = fr;
-            g_fab.frame = CGRectMake(2, 2, 48, 48);
-            g_fab.hidden = NO;
+    if (g_hostWin) {
+        // ONLY interact when needed — size is the hit region
+        BOOL open = g_menuOpen.load() && g_panel && !g_panel.hidden && g_panel.alpha > 0.05f;
+        CGRect screen = UIScreen.mainScreen.bounds;
+        if (open) {
+            CGRect pf = CGRectMake(16, 40, 340, 420);
+            CGRect ff = CGRectMake(MAX(16, screen.size.width - 64), 56, 52, 52);
+            g_hostWin.frame = CGRectInset(CGRectUnion(pf, ff), -4, -4);
+            // clamp off home indicator
+            CGFloat maxY = screen.size.height - 40.f;
+            if (g_hostWin.frame.origin.y + g_hostWin.frame.size.height > maxY) {
+                CGRect r = g_hostWin.frame;
+                r.size.height = MAX(1.f, maxY - r.origin.y);
+                g_hostWin.frame = r;
+            }
+        } else {
+            g_hostWin.frame = CGRectMake(MAX(16, screen.size.width - 64), 56, 48, 48);
         }
-        [g_hostWin.rootViewController.view bringSubviewToFront:g_fab];
-        if (g_panel) [g_hostWin.rootViewController.view bringSubviewToFront:g_panel];
+        g_hostWin.userInteractionEnabled = YES;
+        g_hostWin.hidden = NO;
+        if (g_hostWin.rootViewController.view)
+            g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
+        if (g_fab) {
+            g_fab.hidden = NO;
+            g_fab.alpha = 1;
+            g_fab.frame = open
+                ? CGRectMake(g_hostWin.bounds.size.width - 52, 4, 44, 44)
+                : CGRectMake(2, 2, 44, 44);
+            [g_hostWin.rootViewController.view bringSubviewToFront:g_fab];
+        }
+        if (g_panel)
+            [g_hostWin.rootViewController.view bringSubviewToFront:g_panel];
     }
     CoreUI_FeaturesTick();
 }
