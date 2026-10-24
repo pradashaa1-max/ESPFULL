@@ -544,9 +544,9 @@ UIView* g_esp_view(void) { return g_esp; }
         if (p.local) continue;
         if (g_espTeam.load() && localTeam >= 0 && p.team == localTeam) continue;
 
-        // Use snapshot pos while aimbot runs — live get_pos jitters with LookAt
+        // Snapshot only when aim/silent — live + LookAt made ESP stick to crosshair
         Vec3 feet = p.pos;
-        if (!g_aimbot.load() && ok_ptr(p.tr)) {
+        if (!g_aimbot.load() && !g_silent.load() && ok_ptr(p.tr)) {
             Vec3 live = get_pos(p.tr);
             if (live.x == live.x && fabsf(live.x) < 1e5f) feet = live;
         }
@@ -743,12 +743,25 @@ UIView* g_esp_view(void) { return g_esp; }
 @end
 
 void CoreUI_EnsureFOVOverlay(UIWindow* win) {
-    if (!win) return;
-    // Always on overlay host root — NEVER inside secure UITextField (broke Y + white шторка)
-    UIView* root = win.rootViewController.view ?: (UIView*)win;
+    (void)win;
+    // ESP on GAME key window (full screen). Overlay host is FAB-sized only — no taps/шторка.
+    UIWindow* game = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    game = UIApplication.sharedApplication.keyWindow;
+#pragma clang diagnostic pop
+    for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow* w in ((UIWindowScene*)sc).windows) {
+            if (w.windowLevel <= UIWindowLevelNormal + 1 && w.isKeyWindow) { game = w; break; }
+            if (!game && w.windowLevel <= UIWindowLevelNormal) game = w;
+        }
+        if (game && game.isKeyWindow) break;
+    }
+    if (!game) return;
+    UIView* root = game.rootViewController.view ?: (UIView*)game;
     CGRect b = root.bounds;
-    if (b.size.width < 2) b = win.bounds;
-    if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
+    if (b.size.width < 2) b = game.bounds;
     b.origin = CGPointZero;
     if (!g_esp) {
         g_esp = [[ESPView alloc] initWithFrame:b];
@@ -883,49 +896,38 @@ static void run_aim(void* cam, void* camTr) {
         g_silentTarget = best;
         g_haveSilent = true;
 
-        float sm = fmaxf(1.f, g_smooth.load());
-        if (g_silent.load()) sm = 1.f;
-
-        static Vec3 smT{};
-        static bool ini = false;
-        if (!ini) { smT = best; ini = true; }
-        smT.x += (best.x - smT.x) / sm;
-        smT.y += (best.y - smT.y) / sm;
-        smT.z += (best.z - smT.z) / sm;
-
-        Vec3 dir = vnorm(vsub(smT, cpos));
-        float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
-        float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
-        pitch = fmaxf(-85.f, fminf(85.f, pitch));
-
         float* aPitch = (float*)((char*)aimCtrl + Offsets::AC_pitch);
         float* aYaw   = (float*)((char*)aimCtrl + Offsets::AC_yaw);
         float curP = *aPitch, curY = *aYaw;
         if (curP != curP || curY != curY) return;
         if (fabsf(curP) > 400.f || fabsf(curY) > 800.f) return;
 
-        float dy = yaw - curY;
-        while (dy >  180.f) dy -= 360.f;
-        while (dy < -180.f) dy += 360.f;
-
-        if (g_silent.load()) {
+        if (g_silent.load() && !g_aimbot.load()) {
+            // Silent: instant on target — NO smooth, NO LookAt (no visible наводка)
+            Vec3 dir = vnorm(vsub(best, cpos));
+            float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
+            float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
+            pitch = fmaxf(-85.f, fminf(85.f, pitch));
             *aPitch = pitch;
-            *aYaw   = curY + dy;
-            // Silent: force cam transform look (angles alone often ignored by game)
-            if (ok_ptr(aimTr) && unity_base()) {
-                Vec3 up{0, 1, 0};
-                using Look = void (*)(void*, Vec3*, Vec3*);
-                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
-            }
+            *aYaw   = yaw;
         } else {
+            // Soft aimbot: smooth + optional light LookAt
+            float sm = fmaxf(1.f, g_smooth.load());
+            static Vec3 smT{};
+            static bool ini = false;
+            if (!ini) { smT = best; ini = true; }
+            smT.x += (best.x - smT.x) / sm;
+            smT.y += (best.y - smT.y) / sm;
+            smT.z += (best.z - smT.z) / sm;
+            Vec3 dir = vnorm(vsub(smT, cpos));
+            float yaw   = atan2f(dir.x, dir.z) * 57.2957795f;
+            float pitch = -asinf(fmaxf(-1.f, fminf(1.f, dir.y))) * 57.2957795f;
+            pitch = fmaxf(-85.f, fminf(85.f, pitch));
+            float dy = yaw - curY;
+            while (dy >  180.f) dy -= 360.f;
+            while (dy < -180.f) dy += 360.f;
             *aPitch = curP + (pitch - curP) / sm;
             *aYaw   = curY + dy / sm;
-            // soft aim also nudges transform lightly for reliability
-            if (ok_ptr(aimTr) && unity_base() && sm <= 3.f) {
-                Vec3 up{0, 1, 0};
-                using Look = void (*)(void*, Vec3*, Vec3*);
-                R<Look>(Offsets::Transform_Internal_LookAt_Inj)(aimTr, &smT, &up);
-            }
         }
     } @catch (...) {
         g_haveSilent = false;

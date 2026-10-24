@@ -801,8 +801,8 @@ static void buildFab(UIView* host) {
     UIWindow* key = [self gameWindow];
     if (key && g_hostWin) {
         CGRect b = key.bounds;
-        if (b.size.width > 2 && !CGRectEqualToRect(g_hostWin.frame, b)) {
-            g_hostWin.frame = b;
+        // do not force full-screen frame each tick (ghost taps / white шторка)
+        if (g_hostWin.rootViewController.view) {
             g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
         }
     }
@@ -837,6 +837,44 @@ static void buildFab(UIView* host) {
         UIView* front = CoreUI_SecureRoot ?: root;
         if (g_panel) [front bringSubviewToFront:g_panel];
         if (g_fab)   [front bringSubviewToFront:g_fab];
+
+        // Touch isolation: host window ONLY covers FAB (and panel if open)
+        // Full-screen overlay = white шторка + ghost taps
+        if (g_hostWin && g_fab) {
+            UIWindow* key = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            key = UIApplication.sharedApplication.keyWindow;
+#pragma clang diagnostic pop
+            for (UIScene* sc in UIApplication.sharedApplication.connectedScenes) {
+                if (![sc isKindOfClass:UIWindowScene.class]) continue;
+                for (UIWindow* w in ((UIWindowScene*)sc).windows)
+                    if (w.isKeyWindow && w != g_hostWin) { key = w; break; }
+                if (key && key != g_hostWin) break;
+            }
+            CGRect screen = key ? key.bounds : UIScreen.mainScreen.bounds;
+            BOOL open = g_panel && !g_panel.hidden && g_panel.alpha > 0.05f;
+            UIView* ref = g_fab.superview ?: g_hostWin;
+            CGRect fr = [ref convertRect:g_fab.frame toView:nil];
+            if (fr.size.width < 1) fr = CGRectMake(screen.size.width - 64, 56, 52, 52);
+            CGRect target = CGRectInset(fr, -4, -4);
+            if (open && g_panel) {
+                CGRect pr = [ref convertRect:g_panel.frame toView:nil];
+                target = CGRectUnion(target, CGRectInset(pr, -6, -6));
+            }
+            // never cover home indicator strip
+            CGFloat maxY = screen.size.height - 40.f;
+            if (target.origin.y + target.size.height > maxY)
+                target.size.height = MAX(1.f, maxY - target.origin.y);
+            if (target.origin.y < 0) { target.size.height += target.origin.y; target.origin.y = 0; }
+            if (!CGRectEqualToRect(g_hostWin.frame, target))
+                g_hostWin.frame = target;
+            // keep fab/panel in local coords inside small window
+            if (!open) {
+                g_fab.frame = CGRectMake(4, 4, 48, 48);
+            }
+        }
+
     }
     CoreUI_FeaturesTick();
 }
