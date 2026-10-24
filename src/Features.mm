@@ -163,6 +163,7 @@ static bool biped_head_feet(void* pc, Vec3* headOut, Vec3* feetOut) {
     return false;
 }
 
+static UIView* g_esp = nil;
 struct PSnap {
     void* obj;
     void* tr;
@@ -417,7 +418,7 @@ static void refresh(void* camTr) {
                 Vec3 sf = w2s(cam, feet);
                 Vec3 sh = w2s(cam, head);
                 if (sf.z >= 0.05f || sh.z >= 0.05f) {
-                    CGFloat H = g_esp ? g_esp.bounds.size.height : UIScreen.mainScreen.bounds.size.height;
+                    CGFloat H = UIScreen.mainScreen.bounds.size.height;
                     CGFloat fy = H - sf.y - 3.f;
                     CGFloat hy = H - sh.y - 3.f;
                     CGFloat top = fminf(fy, hy), bot = fmaxf(fy, hy);
@@ -576,7 +577,7 @@ static void draw_corner(CGContextRef ctx, CGFloat l, CGFloat t, CGFloat w, CGFlo
 }
 
 @interface ESPView : UIView @end
-static ESPView* g_esp = nil;
+
 UIView* g_esp_view(void) { return g_esp; }
 
 @implementation ESPView
