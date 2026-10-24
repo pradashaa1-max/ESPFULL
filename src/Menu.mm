@@ -252,7 +252,8 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 @end
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
-static UIWindow*     g_hostWin = nil;  // GAME key window — no extra overlay
+static UIWindow*     g_hostWin = nil;  // control: FAB+menu only (interactive)
+static UIWindow*     g_drawWin = nil;  // draw: ESP+secure (NO interaction → no ghost taps)
 static UIView*       g_panel   = nil;
 static UIView*       g_fab     = nil;
 static UIView*       g_content = nil;
@@ -275,11 +276,10 @@ static CGFloat FC_BottomInset(UIView* v) {
     return inset;
 }
 static CGRect FC_FrameAboveHome(UIView* host) {
+    // Full frame for correct ESP Y (cropping caused boxes to go up)
     CGRect b = host.bounds;
     if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
-    CGFloat bot = FC_BottomInset(host);
     b.origin = CGPointZero;
-    b.size.height = MAX(1.f, b.size.height - bot);
     return b;
 }
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
@@ -361,7 +361,7 @@ static void applyHideRec(UIView* root) {
     }
     if (g_panel) [g_panel.superview bringSubviewToFront:g_panel];
     if (g_fab)   [g_fab.superview bringSubviewToFront:g_fab];
-    CoreUI_EnsureFOVOverlay(g_hostWin);
+    if (g_drawWin) CoreUI_EnsureFOVOverlay(g_drawWin);
 }
 
 
@@ -707,16 +707,35 @@ static void buildPanel(UIView* host) {
 }
 - (void)toggle {
     extern UIView* g_panel_ref(void);
+    extern UIView* g_fab_ref(void);
     bool open = !g_menuOpen.load();
     g_menuOpen = open;
     UIView* panel = g_panel_ref();
+    UIView* fab = g_fab_ref();
     if (!panel) return;
+    CGRect screen = UIScreen.mainScreen.bounds;
+    if (g_hostWin) {
+        if (open) {
+            CGRect pf = CGRectMake(16, 40, 340, 420);
+            CGRect ff = CGRectMake(MAX(16, screen.size.width - 64), 56, 52, 52);
+            g_hostWin.frame = CGRectInset(CGRectUnion(pf, ff), -10, -10);
+            if (g_hostWin.rootViewController.view)
+                g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
+            panel.frame = CGRectMake(8, 8, 340, 420);
+            if (fab) fab.frame = CGRectMake(g_hostWin.bounds.size.width - 56, 8, 48, 48);
+        } else {
+            g_hostWin.frame = CGRectMake(MAX(16, screen.size.width - 64), 56, 52, 52);
+            if (g_hostWin.rootViewController.view)
+                g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
+            if (fab) fab.frame = CGRectMake(2, 2, 48, 48);
+        }
+    }
     panel.hidden = NO;
     [panel.superview bringSubviewToFront:panel];
     [UIView animateWithDuration:0.2 animations:^{
         panel.alpha = open ? 1.0 : 0.0;
         panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.94, 0.94);
-    } completion:^(BOOL f) {
+    } completion:^(BOOL finished) {
         if (!open) panel.hidden = YES;
     }];
 }
@@ -724,21 +743,18 @@ static void buildPanel(UIView* host) {
 
 static void buildFab(UIView* host) {
     if (g_fab) return;
-    // Visible position: top-right in landscape-ish coords
-    CGFloat x = MAX(16, host.bounds.size.width - 70);
-    if (x < 20) x = 20;
-    g_fab = [[UIView alloc] initWithFrame:CGRectMake(x, 40, 52, 52)];
+    g_fab = [[UIView alloc] initWithFrame:CGRectMake(2, 2, 48, 48)];
     g_fab.backgroundColor = Accent();
-    g_fab.layer.cornerRadius = 26;
+    g_fab.layer.cornerRadius = 24;
     g_fab.layer.shadowColor = Accent().CGColor;
-    g_fab.layer.shadowOpacity = 0.15;
-    g_fab.alpha = 0.92;
-    g_fab.layer.shadowRadius = 12;
-    g_fab.layer.shadowOpacity = 0.4;
+    g_fab.layer.shadowOpacity = 0.35;
+    g_fab.layer.shadowRadius = 10;
+    g_fab.alpha = 1.0;
+    g_fab.hidden = NO;
     g_fab.userInteractionEnabled = YES;
     UILabel* star = [[UILabel alloc] initWithFrame:g_fab.bounds];
     star.text = @"F";
-    star.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
+    star.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBlack];
     star.textAlignment = NSTextAlignmentCenter;
     star.textColor = UIColor.whiteColor;
     star.userInteractionEnabled = NO;
@@ -749,11 +765,6 @@ static void buildFab(UIView* host) {
     [btn addTarget:[FabToggle shared] action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
-    // Drag only after movement — don't kill taps
-    UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc] initWithTarget:[CoreUIDrag class] action:@selector(onPan:)];
-    pan.maximumNumberOfTouches = 1;
-    pan.cancelsTouchesInView = NO;
-    [g_fab addGestureRecognizer:pan];
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
@@ -795,13 +806,33 @@ static void buildFab(UIView* host) {
         return;
     }
 
-    // Separate overlay window — NEVER inject UITextField into Unity/game window
-    // (that is what crashes on map load)
-    if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
+    // DRAW window: full screen, interaction OFF — hide-rec + ESP, zero taps
+    if (!g_drawWin || ![g_drawWin isKindOfClass:[ACW class]]) {
         CGRect f = key.bounds;
         if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
-        ACW* ov = [[ACW alloc] initWithFrame:f];
-        ov.windowLevel = UIWindowLevelStatusBar + 1;
+        ACW* dw = [[ACW alloc] initWithFrame:f];
+        dw.windowLevel = UIWindowLevelStatusBar;
+        dw.backgroundColor = UIColor.clearColor;
+        if (@available(iOS 13.0, *)) {
+            dw.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+            if (key.windowScene) dw.windowScene = key.windowScene;
+        }
+        dw.rootViewController = [ACVC new];
+        dw.userInteractionEnabled = NO; // CRITICAL: cannot steal taps
+        dw.hidden = NO;
+        g_drawWin = dw;
+    } else {
+        g_drawWin.frame = key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
+        g_drawWin.userInteractionEnabled = NO;
+        g_drawWin.hidden = NO;
+    }
+
+    // CTRL window: only FAB size — menu expands it when open
+    CGFloat W = key.bounds.size.width > 2 ? key.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
+    CGRect fabRect = CGRectMake(MAX(16, W - 64), 56, 52, 52);
+    if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
+        ACW* ov = [[ACW alloc] initWithFrame:fabRect];
+        ov.windowLevel = UIWindowLevelStatusBar + 2;
         ov.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *)) {
             ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -810,20 +841,31 @@ static void buildFab(UIView* host) {
         ov.rootViewController = [ACVC new];
         ov.userInteractionEnabled = YES;
         ov.hidden = NO;
-        // do NOT makeKeyAndVisible
         g_hostWin = ov;
-    } else {
-        g_hostWin.frame = key.bounds;
     }
+
+    UIView* drawRoot = g_drawWin.rootViewController.view;
+    drawRoot.frame = g_drawWin.bounds;
+    drawRoot.backgroundColor = UIColor.clearColor;
+    drawRoot.userInteractionEnabled = NO;
 
     UIView* root = g_hostWin.rootViewController.view;
     root.frame = g_hostWin.bounds;
     root.backgroundColor = UIColor.clearColor;
 
-    buildPanel(root);
+        buildPanel(root);
     buildFab(root);
-    applyHideRec(root);   // secure + ESP only inside OVERLAY
-    CoreUI_EnsureFOVOverlay(g_hostWin);
+    if (g_fab) {
+        g_fab.frame = CGRectMake(2, 2, 48, 48);
+        g_fab.hidden = NO;
+        g_fab.alpha = 1;
+    }
+    // hide-rec + ESP on DRAW window (no interaction)
+    applyHideRec(drawRoot);
+    CoreUI_EnsureFOVOverlay(g_drawWin);
+
+    if (g_panel) [root bringSubviewToFront:g_panel];
+    if (g_fab)   [root bringSubviewToFront:g_fab];
 
     if (g_panel) [root bringSubviewToFront:g_panel];
     if (g_fab)   [root bringSubviewToFront:g_fab];
@@ -837,59 +879,29 @@ static void buildFab(UIView* host) {
 
 + (void)onTick {
     UIWindow* key = [self gameWindow];
-    if (key && g_hostWin) {
-        CGRect b = key.bounds;
-        // Full overlay for hide-rec, leave bottom strip for gray home indicator
-        if (key && g_hostWin) {
-            CGRect b = key.bounds;
-            if (b.size.width > 2) {
-                CGFloat bot = 34.f;
-                if (@available(iOS 11.0, *)) {
-                    if (key.safeAreaInsets.bottom > 1.f) bot = key.safeAreaInsets.bottom;
-                }
-                b.size.height = MAX(1.f, b.size.height - bot);
-                if (!CGRectEqualToRect(g_hostWin.frame, b))
-                    g_hostWin.frame = b;
-                g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
-            }
-        }
+    if (g_drawWin) {
+        CGRect b = key && key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
+        g_drawWin.frame = b;
+        g_drawWin.userInteractionEnabled = NO;
+        g_drawWin.hidden = NO;
+        if (g_drawWin.rootViewController.view)
+            g_drawWin.rootViewController.view.frame = g_drawWin.bounds;
+        if (g_hideRec.load())
+            applyHideRec(g_drawWin.rootViewController.view);
+        CoreUI_EnsureFOVOverlay(g_drawWin);
     }
-    if (g_hostWin) {
-        UIView* root = g_hostWin.rootViewController.view;
-        // keep secure full-size — interaction MUST stay YES so panel/fab receive touches
-        if (g_secureField) {
-            CGRect sf = FC_FrameAboveHome(root);
-            g_secureField.frame = sf;
-            g_secureField.userInteractionEnabled = YES;
-            if (CoreUI_SecureRoot) {
-                CoreUI_SecureRoot.frame = CGRectMake(0,0,sf.size.width,sf.size.height);
-                CoreUI_SecureRoot.userInteractionEnabled = YES;
-            }
+    if (g_hostWin && g_fab) {
+        BOOL open = g_panel && !g_panel.hidden && g_panel.alpha > 0.05f;
+        if (!open) {
+            CGFloat W = UIScreen.mainScreen.bounds.size.width;
+            CGRect fr = CGRectMake(MAX(16, W - 64), 56, 52, 52);
+            if (!CGRectEqualToRect(g_hostWin.frame, fr))
+                g_hostWin.frame = fr;
+            g_fab.frame = CGRectMake(2, 2, 48, 48);
+            g_fab.hidden = NO;
         }
-        // re-home ESP into secure container every tick when hide is on
-        if (g_hideRec.load() && CoreUI_SecureRoot) {
-            extern UIView* g_esp_view(void);
-            UIView* esp = g_esp_view();
-            if (esp && esp.superview != CoreUI_SecureRoot) {
-                [esp removeFromSuperview];
-                [CoreUI_SecureRoot insertSubview:esp atIndex:0];
-            }
-
-            if (g_panel && g_panel.superview != CoreUI_SecureRoot) {
-                [g_panel removeFromSuperview];
-                [CoreUI_SecureRoot addSubview:g_panel];
-            }
-            if (g_fab && g_fab.superview != CoreUI_SecureRoot) {
-                [g_fab removeFromSuperview];
-                [CoreUI_SecureRoot addSubview:g_fab];
-            }
-        }
-        CoreUI_EnsureFOVOverlay(g_hostWin);
-        UIView* front = CoreUI_SecureRoot ?: root;
-        if (g_panel) [front bringSubviewToFront:g_panel];
-        if (g_fab)   [front bringSubviewToFront:g_fab];
-
-
+        [g_hostWin.rootViewController.view bringSubviewToFront:g_fab];
+        if (g_panel) [g_hostWin.rootViewController.view bringSubviewToFront:g_panel];
     }
     CoreUI_FeaturesTick();
 }

@@ -505,15 +505,12 @@ UIView* g_esp_view(void) { return g_esp; }
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (!ctx) return;
     CGFloat W = self.bounds.size.width;
-    CGFloat Hview = self.bounds.size.height;
-    if (W < 2 || Hview < 2) return;
-    // Secure layer is shorter (home strip) — use full screen H for W2S Y or boxes go up
-    CGFloat H = UIScreen.mainScreen.bounds.size.height;
-    if (H < Hview) H = Hview;
+    CGFloat H = self.bounds.size.height;
+    if (W < 2 || H < 2) return;
 
     if (g_fovDraw.load() && (g_aimbot.load() || g_silent.load())) {
-        CGFloat cx = W * 0.5f, cy = Hview * 0.5f;
-        CGFloat side = W < Hview ? W : Hview;
+        CGFloat cx = W * 0.5f, cy = H * 0.5f;
+        CGFloat side = W < H ? W : H;
         CGFloat r = side * (0.04f + g_fov.load() / 30.f * 0.20f);
         CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.2 green:0.6 blue:1 alpha:1].CGColor);
         CGContextSetLineWidth(ctx, 2);
@@ -559,16 +556,10 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 sh = w2s(cam, head);
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
-        // Map into this view: W2S is screen points; view may be shorter (hide-rec strip)
-        CGFloat Wscr = UIScreen.mainScreen.bounds.size.width;
-        CGFloat Hscr = UIScreen.mainScreen.bounds.size.height;
-        if (Wscr < 2) Wscr = W;
-        if (Hscr < 2) Hscr = Hview;
-        CGFloat fx = sf.x * (W / Wscr);
-        CGFloat hx = sh.x * (W / Wscr);
-        // Bottom-left Unity → UIKit: use screen H then scale into view (fixes "boxes go up")
-        CGFloat fy = (Hscr - sf.y) * (Hview / Hscr);
-        CGFloat hy = (Hscr - sh.y) * (Hview / Hscr);
+        CGFloat fx = sf.x - 3.f;
+        CGFloat hx = sh.x - 3.f;
+        CGFloat fy = H - sf.y - 3.f;
+        CGFloat hy = H - sh.y - 3.f;
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
@@ -752,14 +743,11 @@ UIView* g_esp_view(void) { return g_esp; }
 @end
 
 void CoreUI_EnsureFOVOverlay(UIWindow* win) {
-    // Prefer secure root when hide-rec ON so ESP is hidden from screenshots/record
-    UIView* root = nil;
-    if (CoreUI_SecureRoot) root = CoreUI_SecureRoot;
-    else if (win) root = win.rootViewController.view ?: (UIView*)win;
-    if (!root) return;
-    CGRect b = root.bounds;
-    if (b.size.width < 2 && win) b = win.bounds;
-    if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
+    if (!win) return;
+    UIView* root = CoreUI_SecureRoot;
+    if (!root) root = win.rootViewController.view ?: (UIView*)win;
+    // ALWAYS full screen size matching UIScreen so W2S Y is correct
+    CGRect b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
     if (!g_esp) {
         g_esp = [[ESPView alloc] initWithFrame:b];
