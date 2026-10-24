@@ -505,12 +505,15 @@ UIView* g_esp_view(void) { return g_esp; }
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (!ctx) return;
     CGFloat W = self.bounds.size.width;
-    CGFloat H = self.bounds.size.height;
-    if (W < 2 || H < 2) return;
+    CGFloat Hview = self.bounds.size.height;
+    if (W < 2 || Hview < 2) return;
+    // Secure layer is shorter (home strip) — use full screen H for W2S Y or boxes go up
+    CGFloat H = UIScreen.mainScreen.bounds.size.height;
+    if (H < Hview) H = Hview;
 
     if (g_fovDraw.load() && (g_aimbot.load() || g_silent.load())) {
-        CGFloat cx = W * 0.5f, cy = H * 0.5f;
-        CGFloat side = W < H ? W : H;
+        CGFloat cx = W * 0.5f, cy = Hview * 0.5f;
+        CGFloat side = W < Hview ? W : Hview;
         CGFloat r = side * (0.04f + g_fov.load() / 30.f * 0.20f);
         CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.2 green:0.6 blue:1 alpha:1].CGColor);
         CGContextSetLineWidth(ctx, 2);
@@ -556,10 +559,16 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 sh = w2s(cam, head);
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
-        CGFloat fx = sf.x - 3.f;
-        CGFloat hx = sh.x - 3.f;
-        CGFloat fy = H - sf.y - 3.f;
-        CGFloat hy = H - sh.y - 3.f;
+        // Map into this view: W2S is screen points; view may be shorter (hide-rec strip)
+        CGFloat Wscr = UIScreen.mainScreen.bounds.size.width;
+        CGFloat Hscr = UIScreen.mainScreen.bounds.size.height;
+        if (Wscr < 2) Wscr = W;
+        if (Hscr < 2) Hscr = Hview;
+        CGFloat fx = sf.x * (W / Wscr);
+        CGFloat hx = sh.x * (W / Wscr);
+        // Bottom-left Unity → UIKit: use screen H then scale into view (fixes "boxes go up")
+        CGFloat fy = (Hscr - sf.y) * (Hview / Hscr);
+        CGFloat hy = (Hscr - sh.y) * (Hview / Hscr);
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 

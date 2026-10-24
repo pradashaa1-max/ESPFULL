@@ -148,6 +148,32 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 }
 @end
 
+
+@interface SecurePassField : UITextField @end
+@implementation SecurePassField
+- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
+    UIView* h = [super hitTest:point withEvent:event];
+    if (!h || h == self) return nil;
+    extern UIView* g_panel_ref(void);
+    extern UIView* g_fab_ref(void);
+    UIView* panel = g_panel_ref();
+    UIView* fab = g_fab_ref();
+    for (UIView* v = h; v; v = v.superview) {
+        if (v == fab || v == panel) return h;
+    }
+    return nil; // never eat game taps
+}
+- (BOOL)canBecomeFirstResponder { return NO; }
+@end
+
+
+@interface PassThroughView : UIView @end
+@implementation PassThroughView
+- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
+    UIView* h = [super hitTest:point withEvent:event];
+    return (h == self) ? nil : h;
+}
+@end
 @interface ACW : UIWindow @end
 @implementation ACW
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -214,8 +240,14 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.clearColor;
+    self.view.userInteractionEnabled = YES;
     if (@available(iOS 13.0, *))
         self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+}
+- (void)loadView {
+    PassThroughView* v = [[PassThroughView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    v.backgroundColor = UIColor.clearColor;
+    self.view = v;
 }
 @end
 
@@ -259,7 +291,7 @@ static void applyHideRec(UIView* root) {
 
     if (on) {
         if (!g_secureField) {
-            g_secureField = [[UITextField alloc] initWithFrame:FC_FrameAboveHome(root)];
+            g_secureField = [[SecurePassField alloc] initWithFrame:FC_FrameAboveHome(root)];
             g_secureField.secureTextEntry = YES;
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -279,7 +311,7 @@ static void applyHideRec(UIView* root) {
             }
         }
         if (!container) {
-            container = [[UIView alloc] initWithFrame:root.bounds];
+            container = [[PassThroughView alloc] initWithFrame:CGRectMake(0,0,g_secureField.bounds.size.width, g_secureField.bounds.size.height)];
             container.backgroundColor = UIColor.clearColor;
             container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [g_secureField addSubview:container];
