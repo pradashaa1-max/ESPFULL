@@ -504,8 +504,14 @@ UIView* g_esp_view(void) { return g_esp; }
 - (void)drawRect:(CGRect)rect {
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (!ctx) return;
-    CGFloat W = self.bounds.size.width;
-    CGFloat H = self.bounds.size.height;
+    // Full screen — matches Unity W2S (not cropped host/secure bounds)
+    CGRect scr = UIScreen.mainScreen.bounds;
+    CGFloat W = scr.size.width;
+    CGFloat H = scr.size.height;
+    if (W < 2 || H < 2) {
+        W = self.bounds.size.width;
+        H = self.bounds.size.height;
+    }
     if (W < 2 || H < 2) return;
 
     if (g_fovDraw.load() && (g_aimbot.load() || g_silent.load())) {
@@ -556,10 +562,11 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 sh = w2s(cam, head);
         if (sf.z < 0.05f && sh.z < 0.05f) continue;
 
-        CGFloat fx = sf.x - 3.f;
-        CGFloat hx = sh.x - 3.f;
-        CGFloat fy = H - sf.y - 3.f;
-        CGFloat hy = H - sh.y - 3.f;
+        CGFloat fx = sf.x;
+        CGFloat hx = sh.x;
+        // +4 moves boxes down (were slightly high)
+        CGFloat fy = H - sf.y + 4.f;
+        CGFloat hy = H - sh.y + 4.f;
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
