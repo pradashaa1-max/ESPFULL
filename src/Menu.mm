@@ -295,65 +295,63 @@ static CGRect FC_FrameAboveHome(UIView* host) {
 }
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
 static void applyHideRec(UIView* root) {
-    // Overlay root only. Everything (ESP + FAB + panel) goes inside secure
-    // so screen recording / screenshots show black where the cheat UI is.
     if (!root) return;
     BOOL on = g_hideRec.load();
 
     if (on) {
+        CGRect full = root.bounds;
+        if (full.size.width < 2) full = UIScreen.mainScreen.bounds;
+        full.origin = CGPointZero;
+
         if (!g_secureField) {
-            g_secureField = [[SecurePassField alloc] initWithFrame:FC_FrameAboveHome(root)];
+            g_secureField = [[SecurePassField alloc] initWithFrame:full];
             g_secureField.secureTextEntry = YES;
             g_secureField.backgroundColor = UIColor.clearColor;
             g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            if (@available(iOS 13.0, *))
+                g_secureField.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
         }
-        g_secureField.frame = FC_FrameAboveHome(root);
-        // YES so children (menu/fab) can receive touches; ACW.pointInside still
-        // filters to panel/fab only so Google/game are fine.
-        g_secureField.userInteractionEnabled = NO; // draw window never takes taps
+        g_secureField.frame = full;
+        g_secureField.secureTextEntry = YES; // re-assert every apply
+        g_secureField.userInteractionEnabled = NO;
         if (g_secureField.superview != root)
+            [root insertSubview:g_secureField atIndex:0];
+        else
             [root insertSubview:g_secureField atIndex:0];
 
         [g_secureField layoutIfNeeded];
-        UIView* container = nil;
-        for (UIView* s in g_secureField.subviews) {
-            if (s.bounds.size.width >= root.bounds.size.width * 0.9) {
-                container = s; break;
-            }
-        }
+
+        // iOS secure container = first subview after secureTextEntry layout
+        UIView* container = g_secureField.subviews.count ? g_secureField.subviews.firstObject : nil;
         if (!container) {
-            container = [[PassThroughView alloc] initWithFrame:CGRectMake(0,0,g_secureField.bounds.size.width, g_secureField.bounds.size.height)];
+            container = [[UIView alloc] initWithFrame:g_secureField.bounds];
             container.backgroundColor = UIColor.clearColor;
             container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             [g_secureField addSubview:container];
         }
-        container.frame = CGRectMake(0,0,g_secureField.bounds.size.width,g_secureField.bounds.size.height);
+        container.frame = g_secureField.bounds;
         container.userInteractionEnabled = NO;
         CoreUI_SecureRoot = container;
 
-        // Only ESP in secure (panel/FAB on ctrl window — no taps from draw)
+        // ESP inside secure → hidden from screen recording / screenshots
         extern UIView* g_esp_view(void);
         UIView* esp = g_esp_view();
-        if (esp && esp.superview != container) {
-            [esp removeFromSuperview];
+        if (esp) {
+            if (esp.superview != container) {
+                [esp removeFromSuperview];
+                [container insertSubview:esp atIndex:0];
+            }
+            // Keep FULL screen bounds so box Y stays correct (Features uses self.bounds)
+            CGRect scr = UIScreen.mainScreen.bounds;
+            scr.origin = CGPointZero;
+            esp.frame = scr;
             esp.userInteractionEnabled = NO;
-            [container insertSubview:esp atIndex:0];
         }
-
     } else {
         CoreUI_SecureRoot = nil;
-        // Move chrome back to overlay root
-        if (g_panel && g_panel.superview != root) {
-            [g_panel removeFromSuperview];
-            [root addSubview:g_panel];
-        }
-        if (g_fab && g_fab.superview != root) {
-            [g_fab removeFromSuperview];
-            [root addSubview:g_fab];
-        }
         extern UIView* g_esp_view(void);
         UIView* esp = g_esp_view();
-        if (esp && esp.superview != root) {
+        if (esp && root && esp.superview != root) {
             [esp removeFromSuperview];
             [root insertSubview:esp atIndex:0];
         }
@@ -362,9 +360,22 @@ static void applyHideRec(UIView* root) {
             g_secureField = nil;
         }
     }
-    if (g_panel) [g_panel.superview bringSubviewToFront:g_panel];
-    if (g_fab)   [g_fab.superview bringSubviewToFront:g_fab];
+    if (g_panel) [root bringSubviewToFront:g_panel];
+    if (g_fab)   [root bringSubviewToFront:g_fab];
     CoreUI_EnsureFOVOverlay(g_hostWin);
+    // After EnsureFOV, re-parent ESP into secure if hide on
+    if (on && CoreUI_SecureRoot) {
+        extern UIView* g_esp_view(void);
+        UIView* esp = g_esp_view();
+        if (esp && esp.superview != CoreUI_SecureRoot) {
+            [esp removeFromSuperview];
+            [CoreUI_SecureRoot insertSubview:esp atIndex:0];
+            CGRect scr = UIScreen.mainScreen.bounds;
+            scr.origin = CGPointZero;
+            esp.frame = scr;
+            esp.userInteractionEnabled = NO;
+        }
+    }
 }
 
 
@@ -793,8 +804,14 @@ static void buildFab(UIView* host) {
     if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
         CGRect f = key.bounds;
         if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
+        // Leave home-indicator strip on game window → gray шторка
+        CGFloat bot = 34.f;
+        if (@available(iOS 11.0, *)) {
+            if (key.safeAreaInsets.bottom > 1.f) bot = key.safeAreaInsets.bottom;
+        }
+        f.size.height = MAX(1.f, f.size.height - bot);
         ACW* ov = [[ACW alloc] initWithFrame:f];
-        ov.windowLevel = UIWindowLevelStatusBar + 1;
+        ov.windowLevel = UIWindowLevelNormal + 1; // low = less шторка activation
         ov.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *)) {
             ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -810,7 +827,13 @@ static void buildFab(UIView* host) {
         if (@available(iOS 13.0, *)) {
             if (key.windowScene) g_hostWin.windowScene = key.windowScene;
         }
-        g_hostWin.frame = key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
+        CGRect f = key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
+        CGFloat bot = 34.f;
+        if (@available(iOS 11.0, *)) {
+            if (key.safeAreaInsets.bottom > 1.f) bot = key.safeAreaInsets.bottom;
+        }
+        f.size.height = MAX(1.f, f.size.height - bot);
+        g_hostWin.frame = f;
         g_hostWin.hidden = NO;
     }
 
@@ -844,9 +867,16 @@ static void buildFab(UIView* host) {
     UIWindow* key = [self gameWindow];
     if (key && g_hostWin) {
         CGRect b = key.bounds;
-        if (b.size.width > 2 && !CGRectEqualToRect(g_hostWin.frame, b)) {
-            g_hostWin.frame = b;
-            g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
+        if (b.size.width > 2) {
+            CGFloat bot = 34.f;
+            if (@available(iOS 11.0, *)) {
+                if (key.safeAreaInsets.bottom > 1.f) bot = key.safeAreaInsets.bottom;
+            }
+            b.size.height = MAX(1.f, b.size.height - bot);
+            if (!CGRectEqualToRect(g_hostWin.frame, b)) {
+                g_hostWin.frame = b;
+                g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
+            }
         }
         g_hostWin.hidden = NO;
         if (@available(iOS 13.0, *))
