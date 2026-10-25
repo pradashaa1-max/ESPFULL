@@ -293,119 +293,117 @@ static CGRect FC_FrameAboveHome(UIView* host) {
     b.origin = CGPointZero;
     return b; // full frame = correct ESP Y; taps filtered by ACW
 }
-// ─── Hide recording (secure UITextField trick) ───────────────────────────────
-static UIView* FC_FindSecureContainer(UITextField* tf) {
+
+// ─── Hide recording: secure UITextField LAYER trick (iOS 13–18) ───────────────
+// ScreenShield-style: reparent CALayer under UITextField's secure sublayer.
+// Plain UIView inside a fake container does NOT hide from ReplayKit/screenshots.
+
+static UITextField* FC_SecureTF(void) {
+    if (!g_secureField) {
+        g_secureField = [[SecurePassField alloc] initWithFrame:CGRectMake(0,0,1,1)];
+        g_secureField.secureTextEntry = YES;
+        g_secureField.userInteractionEnabled = NO;
+        g_secureField.backgroundColor = UIColor.clearColor;
+        if (@available(iOS 13.0, *))
+            g_secureField.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    }
+    g_secureField.secureTextEntry = YES;
+    return g_secureField;
+}
+
+static CALayer* FC_SecureLayer(UITextField* tf) {
     if (!tf) return nil;
     [tf layoutIfNeeded];
-    // Real secure canvas only — plain UIView is NOT capture-protected
-    for (UIView* v in tf.subviews) {
-        NSString* n = NSStringFromClass(v.class);
-        if ([n containsString:@"Canvas"] || [n containsString:@"Content"] ||
-            [n containsString:@"Text"] || [n containsString:@"Secure"])
-            return v;
+    // Prefer last sublayer of the field (secure canvas on modern iOS)
+    if (tf.layer.sublayers.count > 0) {
+        CALayer* last = tf.layer.sublayers.lastObject;
+        if (last) return last;
     }
-    return tf.subviews.count ? tf.subviews.firstObject : nil;
+    // Fallback: first subview's layer
+    if (tf.subviews.count > 0)
+        return tf.subviews.firstObject.layer;
+    return nil;
+}
+
+static void FC_AttachSecure(UIView* view, UIView* host) {
+    if (!view) return;
+    UITextField* tf = FC_SecureTF();
+    UIView* anchor = host ?: view.superview;
+    if (anchor && tf.superview != anchor) {
+        [anchor insertSubview:tf atIndex:0];
+    }
+    tf.frame = CGRectMake(0, 0, 1, 1); // non-zero forces secure layer create
+    tf.secureTextEntry = YES;
+    [tf setNeedsLayout];
+    [tf layoutIfNeeded];
+
+    CALayer* secure = FC_SecureLayer(tf);
+    if (secure) {
+        // Layer reparent — content is excluded from screen capture
+        if (view.layer.superlayer != secure) {
+            CGRect f = view.frame;
+            [secure addSublayer:view.layer];
+            view.frame = f;
+        }
+        CoreUI_SecureRoot = (tf.subviews.count ? tf.subviews.firstObject : nil);
+        return;
+    }
+    // Last resort: UIView hierarchy (older iOS)
+    UIView* c = tf.subviews.firstObject;
+    if (c) {
+        if (view.superview != c) {
+            [view removeFromSuperview];
+            [c addSubview:view];
+        }
+        CGRect scr = UIScreen.mainScreen.bounds;
+        scr.origin = CGPointZero;
+        view.frame = scr;
+        CoreUI_SecureRoot = c;
+    }
+}
+
+static void FC_DetachSecure(UIView* view, UIView* root) {
+    if (!view) return;
+    // Restore as normal subview of root
+    if (view.layer.superlayer && view.layer.superlayer != root.layer) {
+        [root.layer addSublayer:view.layer];
+    }
+    if (view.superview != root) {
+        [view removeFromSuperview];
+        [root insertSubview:view atIndex:0];
+    }
+    CGRect scr = UIScreen.mainScreen.bounds;
+    scr.origin = CGPointZero;
+    view.frame = scr;
 }
 
 static void applyHideRec(UIView* root) {
     if (!root) return;
     BOOL on = g_hideRec.load();
+    extern UIView* g_esp_view(void);
+    UIView* esp = g_esp_view();
 
     if (on) {
-        CGRect full = UIScreen.mainScreen.bounds;
-        full.origin = CGPointZero;
-
-        if (!g_secureField) {
-            g_secureField = [[SecurePassField alloc] initWithFrame:full];
-            g_secureField.secureTextEntry = YES;
-            g_secureField.backgroundColor = UIColor.clearColor;
+        FC_AttachSecure(esp, root);
+        // Keep FAB/panel outside secure so menu stays usable & visible to you;
+        // ESP/FOV-in-ESP are what recordings must not show.
+        if (g_secureField) {
             g_secureField.userInteractionEnabled = NO;
-            g_secureField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            if (@available(iOS 13.0, *))
-                g_secureField.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-        }
-        g_secureField.frame = full;
-        g_secureField.secureTextEntry = YES;
-        g_secureField.userInteractionEnabled = NO;
-
-        if (g_secureField.superview != root)
-            [root insertSubview:g_secureField atIndex:0];
-        else
             [root sendSubviewToBack:g_secureField];
-
-        [g_secureField setNeedsLayout];
-        [g_secureField layoutIfNeeded];
-        [root layoutIfNeeded];
-
-        UIView* container = FC_FindSecureContainer(g_secureField);
-        if (!container) {
-            // one more layout pass — subviews appear after in hierarchy
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (!g_hideRec.load() || !g_secureField) return;
-                UIView* c = FC_FindSecureContainer(g_secureField);
-                if (!c) return;
-                CoreUI_SecureRoot = c;
-                c.userInteractionEnabled = NO;
-                extern UIView* g_esp_view(void);
-                UIView* esp = g_esp_view();
-                if (esp) {
-                    if (esp.superview != c) {
-                        [esp removeFromSuperview];
-                        [c insertSubview:esp atIndex:0];
-                    }
-                    CGRect scr = UIScreen.mainScreen.bounds;
-                    scr.origin = CGPointZero;
-                    esp.frame = scr;
-                    esp.userInteractionEnabled = NO;
-                    [esp setNeedsDisplay];
-                }
-            });
-            return;
-        }
-        container.frame = g_secureField.bounds;
-        container.userInteractionEnabled = NO;
-        CoreUI_SecureRoot = container;
-
-        extern UIView* g_esp_view(void);
-        UIView* esp = g_esp_view();
-        if (esp) {
-            if (esp.superview != container) {
-                [esp removeFromSuperview];
-                [container insertSubview:esp atIndex:0];
-            }
-            CGRect scr = UIScreen.mainScreen.bounds;
-            scr.origin = CGPointZero;
-            esp.frame = scr;
-            esp.userInteractionEnabled = NO;
-            [esp setNeedsDisplay];
         }
     } else {
         CoreUI_SecureRoot = nil;
-        extern UIView* g_esp_view(void);
-        UIView* esp = g_esp_view();
-        if (esp && g_secureField && esp.superview &&
-            (esp.superview == g_secureField || [esp isDescendantOfView:g_secureField])) {
-            [esp removeFromSuperview];
-            [root insertSubview:esp atIndex:0];
-            CGRect scr = UIScreen.mainScreen.bounds;
-            scr.origin = CGPointZero;
-            esp.frame = scr;
-        }
+        if (esp) FC_DetachSecure(esp, root);
         if (g_secureField) {
             [g_secureField removeFromSuperview];
+            // keep instance for next enable (faster), just detach
+            // full destroy:
             g_secureField = nil;
         }
     }
     CoreUI_EnsureFOVOverlay(g_hostWin);
-    if (on && CoreUI_SecureRoot) {
-        extern UIView* g_esp_view(void);
-        UIView* esp = g_esp_view();
-        if (esp && esp.superview != CoreUI_SecureRoot) {
-            [esp removeFromSuperview];
-            [CoreUI_SecureRoot insertSubview:esp atIndex:0];
-        }
-    }
 }
+
 
 
 static UIView* makeSwitch(NSString* title, NSString* sub, bool on, void(^cb)(bool)) {
