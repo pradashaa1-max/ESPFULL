@@ -179,27 +179,25 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
+        self.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *))
             self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-        self.backgroundColor = UIColor.clearColor;
     }
     return self;
 }
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
+    // ONLY fab or visible panel — everything else passes to the game (no phantom taps)
     extern UIView* g_panel_ref(void);
     extern UIView* g_fab_ref(void);
     UIView* panel = g_panel_ref();
     UIView* fab = g_fab_ref();
-    CGFloat H = self.bounds.size.height;
-    if (point.y > H - 36.f) return NO;
-    if (point.y < 10.f) return NO;
-    if (panel && !panel.hidden && panel.alpha > 0.05f) {
-        CGPoint lp = [self convertPoint:point toView:panel];
-        if (CGRectContainsPoint(panel.bounds, lp)) return YES;
+    if (fab && !fab.hidden && fab.alpha > 0.01f) {
+        CGPoint p = [self convertPoint:point toView:fab];
+        if (CGRectContainsPoint(fab.bounds, p)) return YES;
     }
-    if (fab && !fab.hidden && fab.alpha > 0.05f) {
-        CGPoint lp = [self convertPoint:point toView:fab];
-        if (CGRectContainsPoint(fab.bounds, lp)) return YES;
+    if (panel && !panel.hidden && panel.alpha > 0.01f) {
+        CGPoint p = [self convertPoint:point toView:panel];
+        if (CGRectContainsPoint(panel.bounds, p)) return YES;
     }
     return NO;
 }
@@ -210,16 +208,16 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     UIView* panel = g_panel_ref();
     UIView* fab = g_fab_ref();
     if (fab && !fab.hidden) {
-        CGPoint lp = [self convertPoint:point toView:fab];
-        if (CGRectContainsPoint(fab.bounds, lp)) {
-            UIView* h = [fab hitTest:lp withEvent:event];
+        CGPoint p = [self convertPoint:point toView:fab];
+        if (CGRectContainsPoint(fab.bounds, p)) {
+            UIView* h = [fab hitTest:p withEvent:event];
             return h ?: fab;
         }
     }
-    if (panel && !panel.hidden && panel.alpha > 0.05f) {
-        CGPoint lp = [self convertPoint:point toView:panel];
-        if (CGRectContainsPoint(panel.bounds, lp)) {
-            UIView* h = [panel hitTest:lp withEvent:event];
+    if (panel && !panel.hidden && panel.alpha > 0.01f) {
+        CGPoint p = [self convertPoint:point toView:panel];
+        if (CGRectContainsPoint(panel.bounds, p)) {
+            UIView* h = [panel hitTest:p withEvent:event];
             return h ?: panel;
         }
     }
@@ -293,14 +291,7 @@ static CGRect FC_FrameAboveHome(UIView* host) {
     CGRect b = host.bounds;
     if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
-    // match draw window: no cover home indicator
-    CGFloat bot = 34.f;
-    if (@available(iOS 11.0, *)) {
-        if (host.safeAreaInsets.bottom > 1.f) bot = host.safeAreaInsets.bottom;
-    }
-    if (b.size.height > bot + 80.f)
-        b.size.height -= bot;
-    return b;
+    return b; // full frame = correct ESP Y; taps filtered by ACW
 }
 // ─── Hide recording (secure UITextField trick) ───────────────────────────────
 static void applyHideRec(UIView* root) {
@@ -373,7 +364,7 @@ static void applyHideRec(UIView* root) {
     }
     if (g_panel) [g_panel.superview bringSubviewToFront:g_panel];
     if (g_fab)   [g_fab.superview bringSubviewToFront:g_fab];
-    if (g_drawWin) CoreUI_EnsureFOVOverlay(g_drawWin);
+    CoreUI_EnsureFOVOverlay(g_hostWin);
 }
 
 
@@ -719,34 +710,15 @@ static void buildPanel(UIView* host) {
 }
 - (void)toggle {
     extern UIView* g_panel_ref(void);
-    extern UIView* g_fab_ref(void);
     bool open = !g_menuOpen.load();
     g_menuOpen = open;
     UIView* panel = g_panel_ref();
-    UIView* fab = g_fab_ref();
     if (!panel) return;
-    CGRect screen = UIScreen.mainScreen.bounds;
-    if (g_hostWin) {
-        if (open) {
-            CGRect pf = CGRectMake(16, 40, 340, 420);
-            CGRect ff = CGRectMake(MAX(16, screen.size.width - 64), 56, 52, 52);
-            g_hostWin.frame = CGRectInset(CGRectUnion(pf, ff), -10, -10);
-            if (g_hostWin.rootViewController.view)
-                g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
-            panel.frame = CGRectMake(8, 8, 340, 420);
-            if (fab) fab.frame = CGRectMake(g_hostWin.bounds.size.width - 56, 8, 48, 48);
-        } else {
-            g_hostWin.frame = CGRectMake(MAX(16, screen.size.width - 64), 56, 52, 52);
-            if (g_hostWin.rootViewController.view)
-                g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
-            if (fab) fab.frame = CGRectMake(2, 2, 48, 48);
-        }
-    }
     panel.hidden = NO;
     [panel.superview bringSubviewToFront:panel];
-    [UIView animateWithDuration:0.2 animations:^{
+    [UIView animateWithDuration:0.18 animations:^{
         panel.alpha = open ? 1.0 : 0.0;
-        panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.94, 0.94);
+        panel.transform = open ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.96, 0.96);
     } completion:^(BOOL finished) {
         if (!open) panel.hidden = YES;
     }];
@@ -818,71 +790,48 @@ static void buildFab(UIView* host) {
         return;
     }
 
-    // DRAW window: full screen, interaction OFF — hide-rec + ESP, zero taps
-    if (!g_drawWin) {
-        CGRect f = FC_DrawFrame(key);
-        UIWindow* dw = [[UIWindow alloc] initWithFrame:f];
-        dw.windowLevel = UIWindowLevelNormal + 1; // below ctrl, above game
-        dw.backgroundColor = UIColor.clearColor;
-        if (@available(iOS 13.0, *)) {
-            dw.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-            if (key.windowScene) dw.windowScene = key.windowScene;
-        }
-        UIViewController* dvc = [UIViewController new];
-        dvc.view.backgroundColor = UIColor.clearColor;
-        dvc.view.userInteractionEnabled = NO;
-        dw.rootViewController = dvc;
-        dw.userInteractionEnabled = NO; // NEVER receives taps
-        dw.hidden = NO;
-        g_drawWin = dw;
-    } else {
-        g_drawWin.frame = FC_DrawFrame(key);
-        g_drawWin.userInteractionEnabled = NO;
-        g_drawWin.hidden = NO;
-    }
-
-    // CTRL window: only FAB size — menu expands it when open
-    CGFloat W = key.bounds.size.width > 2 ? key.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
-    CGRect fabRect = CGRectMake(MAX(16, W - 64), 56, 52, 52);
     if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
-        ACW* ov = [[ACW alloc] initWithFrame:fabRect];
-        ov.windowLevel = UIWindowLevelStatusBar + 2;
+        CGRect f = key.bounds;
+        if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
+        ACW* ov = [[ACW alloc] initWithFrame:f];
+        ov.windowLevel = UIWindowLevelStatusBar + 1;
         ov.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *)) {
             ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
             if (key.windowScene) ov.windowScene = key.windowScene;
         }
-        ov.rootViewController = [ACVC new];
-        ov.userInteractionEnabled = YES;
+        ACVC* vc = [ACVC new];
+        ov.rootViewController = vc;
+        vc.view.backgroundColor = UIColor.clearColor;
+        ov.userInteractionEnabled = YES; // needed for FAB; pointInside filters rest
         ov.hidden = NO;
         g_hostWin = ov;
+    } else {
+        if (@available(iOS 13.0, *)) {
+            if (key.windowScene) g_hostWin.windowScene = key.windowScene;
+        }
+        g_hostWin.frame = key.bounds.size.width > 2 ? key.bounds : UIScreen.mainScreen.bounds;
+        g_hostWin.hidden = NO;
     }
-
-    UIView* drawRoot = g_drawWin.rootViewController.view;
-    drawRoot.frame = g_drawWin.bounds;
-    drawRoot.backgroundColor = UIColor.clearColor;
-    drawRoot.userInteractionEnabled = NO;
 
     UIView* root = g_hostWin.rootViewController.view;
     root.frame = g_hostWin.bounds;
     root.backgroundColor = UIColor.clearColor;
 
-        buildPanel(root);
+    buildPanel(root);
     buildFab(root);
     if (g_fab) {
-        g_fab.frame = CGRectMake(2, 2, 48, 48);
+        CGFloat W = root.bounds.size.width;
+        if (W < 2) W = UIScreen.mainScreen.bounds.size.width;
+        g_fab.frame = CGRectMake(MAX(12, W - 60), 50, 48, 48);
         g_fab.hidden = NO;
         g_fab.alpha = 1;
+        [root bringSubviewToFront:g_fab];
     }
-    // hide-rec + ESP on DRAW window (no interaction)
-    applyHideRec(drawRoot);
-    CoreUI_EnsureFOVOverlay(g_drawWin);
-
+    applyHideRec(root);
+    CoreUI_EnsureFOVOverlay(g_hostWin);
     if (g_panel) [root bringSubviewToFront:g_panel];
-    if (g_fab)   [root bringSubviewToFront:g_fab];
-
-    if (g_panel) [root bringSubviewToFront:g_panel];
-    if (g_fab)   [root bringSubviewToFront:g_fab];
+    if (g_fab) [root bringSubviewToFront:g_fab];
 
     if (!g_tick) {
         g_tick = [CADisplayLink displayLinkWithTarget:self selector:@selector(onTick)];
@@ -893,55 +842,43 @@ static void buildFab(UIView* host) {
 
 + (void)onTick {
     UIWindow* key = [self gameWindow];
-    if (g_drawWin) {
-        g_drawWin.frame = FC_DrawFrame(key);
-        g_drawWin.userInteractionEnabled = NO;
-        g_drawWin.hidden = NO;
-        if (g_drawWin.rootViewController.view) {
-            g_drawWin.rootViewController.view.userInteractionEnabled = NO;
-            g_drawWin.rootViewController.view.frame = g_drawWin.bounds;
+    if (key && g_hostWin) {
+        CGRect b = key.bounds;
+        if (b.size.width > 2 && !CGRectEqualToRect(g_hostWin.frame, b)) {
+            g_hostWin.frame = b;
+            g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
         }
-        if (g_secureField) g_secureField.userInteractionEnabled = NO;
-        if (CoreUI_SecureRoot) CoreUI_SecureRoot.userInteractionEnabled = NO;
+        g_hostWin.hidden = NO;
+        if (@available(iOS 13.0, *))
+            g_hostWin.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    }
+    if (g_hostWin) {
+        UIView* root = g_hostWin.rootViewController.view;
         if (g_hideRec.load())
-            applyHideRec(g_drawWin.rootViewController.view);
-        CoreUI_EnsureFOVOverlay(g_drawWin);
+            applyHideRec(root);
+        else if (g_secureField) {
+            // keep structure stable
+        }
+        CoreUI_EnsureFOVOverlay(g_hostWin);
         extern UIView* g_esp_view(void);
         UIView* esp = g_esp_view();
         if (esp) esp.userInteractionEnabled = NO;
-    }
-    if (g_hostWin) {
-        // ONLY interact when needed — size is the hit region
-        BOOL open = g_menuOpen.load() && g_panel && !g_panel.hidden && g_panel.alpha > 0.05f;
-        CGRect screen = UIScreen.mainScreen.bounds;
-        if (open) {
-            CGRect pf = CGRectMake(16, 40, 340, 420);
-            CGRect ff = CGRectMake(MAX(16, screen.size.width - 64), 56, 52, 52);
-            g_hostWin.frame = CGRectInset(CGRectUnion(pf, ff), -4, -4);
-            // clamp off home indicator
-            CGFloat maxY = screen.size.height - 40.f;
-            if (g_hostWin.frame.origin.y + g_hostWin.frame.size.height > maxY) {
-                CGRect r = g_hostWin.frame;
-                r.size.height = MAX(1.f, maxY - r.origin.y);
-                g_hostWin.frame = r;
-            }
-        } else {
-            g_hostWin.frame = CGRectMake(MAX(16, screen.size.width - 56), 52, 44, 44);
+        if (g_secureField) g_secureField.userInteractionEnabled = NO;
+        if (CoreUI_SecureRoot) {
+            // secure container: allow only if child is fab/panel (hits go via ACW)
+            CoreUI_SecureRoot.userInteractionEnabled = NO;
         }
-        g_hostWin.userInteractionEnabled = YES;
-        g_hostWin.hidden = NO;
-        if (g_hostWin.rootViewController.view)
-            g_hostWin.rootViewController.view.frame = g_hostWin.bounds;
+        // FAB + panel on ROOT (not inside non-interactive secure)
         if (g_fab) {
             g_fab.hidden = NO;
             g_fab.alpha = 1;
-            g_fab.frame = open
-                ? CGRectMake(g_hostWin.bounds.size.width - 52, 4, 44, 44)
-                : CGRectMake(2, 2, 44, 44);
-            [g_hostWin.rootViewController.view bringSubviewToFront:g_fab];
+            if (g_fab.superview != root) [root addSubview:g_fab];
+            [root bringSubviewToFront:g_fab];
         }
-        if (g_panel)
-            [g_hostWin.rootViewController.view bringSubviewToFront:g_panel];
+        if (g_panel) {
+            if (g_panel.superview != root) [root addSubview:g_panel];
+            [root bringSubviewToFront:g_panel];
+        }
     }
     CoreUI_FeaturesTick();
 }

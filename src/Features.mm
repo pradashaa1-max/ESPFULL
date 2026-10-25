@@ -505,15 +505,12 @@ UIView* g_esp_view(void) { return g_esp; }
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (!ctx) return;
     CGFloat W = self.bounds.size.width;
-    CGFloat Hview = self.bounds.size.height;
-    if (W < 2 || Hview < 2) return;
-    // View omits home strip; W2S uses full screen — map Y into this view
-    CGFloat Hscr = UIScreen.mainScreen.bounds.size.height;
-    if (Hscr < 2) Hscr = Hview;
+    CGFloat H = self.bounds.size.height;
+    if (W < 2 || H < 2) return;
 
     if (g_fovDraw.load() && (g_aimbot.load() || g_silent.load())) {
-        CGFloat cx = W * 0.5f, cy = Hview * 0.5f;
-        CGFloat side = W < Hview ? W : Hview;
+        CGFloat cx = W * 0.5f, cy = H * 0.5f;
+        CGFloat side = W < H ? W : H;
         CGFloat r = side * (0.04f + g_fov.load() / 30.f * 0.20f);
         CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:0.2 green:0.6 blue:1 alpha:1].CGColor);
         CGContextSetLineWidth(ctx, 2);
@@ -561,9 +558,8 @@ UIView* g_esp_view(void) { return g_esp; }
 
         CGFloat fx = sf.x - 3.f;
         CGFloat hx = sh.x - 3.f;
-        // top-aligned view: screen Y → view Y (no upward drift)
-        CGFloat fy = (Hscr - sf.y) * (Hview / Hscr);
-        CGFloat hy = (Hscr - sh.y) * (Hview / Hscr);
+        CGFloat fy = H - sf.y - 3.f;
+        CGFloat hy = H - sh.y - 3.f;
 
         if ((fx < -50 && hx < -50) || (fx > W + 50 && hx > W + 50)) continue;
 
@@ -710,8 +706,8 @@ UIView* g_esp_view(void) { return g_esp; }
         Vec3 sc = w2s(cam, w.pos);
         if (sc.z < 0.05f) continue;
         CGFloat x = sc.x - 3.f;
-        CGFloat y = (Hscr - sc.y) * (Hview / Hscr);
-        if (x < -40 || x > W + 40 || y < -40 || y > Hview + 40) continue;
+        CGFloat y = H - sc.y - 3.f;
+        if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
         // bomb / smoke only — molly ESP removed
         BOOL isSmoke = NO;
         if (!isBomb) {
@@ -748,9 +744,9 @@ UIView* g_esp_view(void) { return g_esp; }
 
 void CoreUI_EnsureFOVOverlay(UIWindow* win) {
     if (!win) return;
-    UIView* root = CoreUI_SecureRoot;
-    if (!root) root = win.rootViewController.view ?: (UIView*)win;
+    UIView* root = CoreUI_SecureRoot ?: (win.rootViewController.view ?: (UIView*)win);
     CGRect b = root.bounds;
+    if (b.size.width < 2) b = win.bounds;
     if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
     if (!g_esp) {
@@ -762,6 +758,7 @@ void CoreUI_EnsureFOVOverlay(UIWindow* win) {
         [root insertSubview:g_esp atIndex:0];
     } else {
         g_esp.frame = b;
+        g_esp.userInteractionEnabled = NO;
         if (g_esp.superview != root) {
             [g_esp removeFromSuperview];
             [root insertSubview:g_esp atIndex:0];
