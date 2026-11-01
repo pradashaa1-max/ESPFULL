@@ -103,11 +103,10 @@ static NSString* L(const char* en, const char* ru) {
 }
 
 static UIColor* Accent() {
-    uint32_t c = g_menuColor.load();
-    return [UIColor colorWithRed:((c>>16)&0xFF)/255.f
-                           green:((c>>8)&0xFF)/255.f
-                            blue:(c&0xFF)/255.f
-                           alpha:((c>>24)&0xFF)/255.f];
+    return [UIColor colorWithRed:0.86 green:0.15 blue:0.15 alpha:1];
+}
+static UIColor* AccentGold() {
+    return [UIColor colorWithRed:1.0 green:0.78 blue:0.10 alpha:1];
 }
 static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     return [UIColor colorWithRed:r green:g blue:b alpha:a];
@@ -692,10 +691,15 @@ static void buildPanel(UIView* host) {
 
     // Logo
     UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 28)];
-    logo.text = @"freeze client";
+    logo.text = @"mark";
     logo.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     logo.textColor = Accent();
     [g_panel addSubview:logo];
+    UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 280, 16)];
+    sub.text = @"antilose64  ·  darling";
+    sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    sub.textColor = [UIColor colorWithWhite:0.7 alpha:1];
+    [g_panel addSubview:sub];
     UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 120, 14)];
     sub.text = @"ASTRAL";
     sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
@@ -773,6 +777,8 @@ static void buildFab(UIView* host) {
     g_fab = [[UIView alloc] initWithFrame:CGRectMake(2, 2, 48, 48)];
     g_fab.backgroundColor = Accent();
     g_fab.layer.cornerRadius = 24;
+    g_fab.layer.borderWidth = 2;
+    g_fab.layer.borderColor = [UIColor colorWithRed:1 green:0.78 blue:0.1 alpha:1].CGColor;
     g_fab.layer.shadowColor = Accent().CGColor;
     g_fab.layer.shadowOpacity = 0.35;
     g_fab.layer.shadowRadius = 10;
@@ -780,7 +786,7 @@ static void buildFab(UIView* host) {
     g_fab.hidden = NO;
     g_fab.userInteractionEnabled = YES;
     UILabel* star = [[UILabel alloc] initWithFrame:g_fab.bounds];
-    star.text = @"F";
+    star.text = @"M";
     star.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBlack];
     star.textAlignment = NSTextAlignmentCenter;
     star.textColor = UIColor.whiteColor;
@@ -792,6 +798,24 @@ static void buildFab(UIView* host) {
     [btn addTarget:[FabToggle shared] action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
+
+    // Optional: drop fab_icon.jpeg into app Documents to custom-icon the FAB
+    @try {
+        NSString* doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSString* ip = [doc stringByAppendingPathComponent:@"fab_icon.jpeg"];
+        UIImage* im = [UIImage imageWithContentsOfFile:ip];
+        if (im) {
+            for (UIView* s in g_fab.subviews) if ([s isKindOfClass:UILabel.class]) s.hidden = YES;
+            UIImageView* iv = [[UIImageView alloc] initWithFrame:CGRectInset(g_fab.bounds, 4, 4)];
+            iv.image = im;
+            iv.contentMode = UIViewContentModeScaleAspectFill;
+            iv.clipsToBounds = YES;
+            iv.layer.cornerRadius = 16;
+            iv.userInteractionEnabled = NO;
+            [g_fab insertSubview:iv atIndex:0];
+        }
+    } @catch (...) {}
+
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
