@@ -1,4 +1,4 @@
-name: Build dylib
+name: mark · antilose64 (darling)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: build
+    name: build mark.dylib
     runs-on: macos-15
     timeout-minutes: 30
 
@@ -16,19 +16,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Xcode
+      - name: Xcode / SDK
         run: |
           xcodebuild -version
           echo "SDK=$(xcrun --sdk iphoneos --show-sdk-path)"
           xcrun -sdk iphoneos clang++ --version
 
-      - name: List sources
+      - name: Sources
         run: |
           ls -la
-          ls -la src include
-          wc -l src/*.mm include/*.h
+          ls -la src include || true
+          wc -l src/*.mm include/*.h || true
 
-      - name: Build
+      - name: Build mark.dylib
         run: |
           set -e
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
@@ -45,13 +45,13 @@ jobs:
             -I"$PWD/include" \
             -fvisibility=hidden \
             -dynamiclib \
-            -install_name @rpath/AstralCheat.dylib \
+            -install_name @rpath/mark.dylib \
             -Wl,-undefined,dynamic_lookup \
             -framework UIKit \
             -framework Foundation \
             -framework QuartzCore \
             -framework CoreGraphics \
-            -o out/AstralCheat.dylib \
+            -o out/mark.dylib \
             src/Menu.mm \
             src/Features.mm \
             > build.log 2>&1
@@ -64,25 +64,25 @@ jobs:
             echo "BUILD FAILED"
             exit $RC
           fi
-          ls -lh out/AstralCheat.dylib
-          cp out/AstralCheat.dylib AstralCheat.dylib
-          echo "BUILD OK"
+          ls -lh out/mark.dylib
+          cp out/mark.dylib mark.dylib
+          echo "mark (antilose64) darling — BUILD OK"
 
-      - name: Upload logs always
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
+          name: mark-build-logs
           path: |
             build.log
-            AstralCheat.dylib
-            out/AstralCheat.dylib
+            mark.dylib
+            out/mark.dylib
           if-no-files-found: ignore
 
-      - name: Upload dylib
+      - name: Upload mark.dylib
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: AstralCheat.dylib
-          path: AstralCheat.dylib
+          name: mark-antilose64-darling
+          path: mark.dylib
           if-no-files-found: error
