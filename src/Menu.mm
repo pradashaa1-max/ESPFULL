@@ -700,11 +700,6 @@ static void buildPanel(UIView* host) {
     sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     sub.textColor = [UIColor colorWithWhite:0.7 alpha:1];
     [g_panel addSubview:sub];
-    UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 120, 14)];
-    sub.text = @"ASTRAL";
-    sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
-    sub.textColor = C(0.3,0.85,1,1);
-    [g_panel addSubview:sub];
 
     // Tabs
     NSArray* titles = @[@"Aim", @"Silent", @"ESP", @"Misc", @"Cfg"];
