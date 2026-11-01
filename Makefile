@@ -1,19 +1,19 @@
-# Theos library — arm64 iOS dylib
-# export THEOS=~theos   (or $HOME/theos)
+# mark (antilose64) — darling
+# export THEOS=~theos
 # make clean && make
-# → .theos/obj/AstralCheat.dylib
+# → .theos/obj/mark.dylib
 
 TARGET := iphone:clang:latest:14.0
 ARCHS = arm64
 DEBUG = 0
 
-LIBRARY_NAME = AstralCheat
+LIBRARY_NAME = mark
 
-AstralCheat_FILES = src/Menu.mm src/Features.mm
-AstralCheat_CFLAGS = -fobjc-arc -O2 -Iinclude -Wno-unused-function -Wno-unused-variable -fexceptions -fvisibility=hidden
-AstralCheat_FRAMEWORKS = UIKit Foundation QuartzCore CoreGraphics
-AstralCheat_INSTALL_PATH = /usr/lib
-AstralCheat_LDFLAGS = -Wl,-undefined,dynamic_lookup
+mark_FILES = src/Menu.mm src/Features.mm
+mark_CFLAGS = -fobjc-arc -O2 -Iinclude -Wno-unused-function -Wno-unused-variable -fexceptions -fvisibility=hidden
+mark_FRAMEWORKS = UIKit Foundation QuartzCore CoreGraphics
+mark_INSTALL_PATH = /usr/lib
+mark_LDFLAGS = -Wl,-undefined,dynamic_lookup
 
 include $(THEOS)/makefiles/common.mk
 include $(THEOS)/makefiles/library.mk
