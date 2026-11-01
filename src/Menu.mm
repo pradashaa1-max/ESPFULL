@@ -6,6 +6,7 @@
 #include <cmath>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 
 void CoreUI_RebuildMenu(void);
 
@@ -29,71 +30,93 @@ std::atomic<bool>  g_espGrenade{true};
 std::atomic<bool>  g_espDist{false};
 std::atomic<bool>  g_espTeam{true};
 std::atomic<bool>  g_noRecoil{false};
-std::atomic<float> g_recoilPct{0.f};      // 0=full, 100=zero
-std::atomic<bool>  g_hideRec{true};       // ON at launch
+std::atomic<float> g_recoilPct{0.f};
+std::atomic<bool>  g_hideRec{true};
 std::atomic<bool>  g_menuOpen{false};
 std::atomic<float> g_fov{15.f};
 std::atomic<float> g_smooth{4.5f};
 std::atomic<int>   g_bone{0};
-std::atomic<int>   g_lang{0};             // 0 EN 1 RU
+std::atomic<int>   g_lang{0};
 std::atomic<uint32_t> g_menuColor{0xFF1E90FF};
 
-// ─── Config persist (NSUserDefaults) ─────────────────────────────────────────
+// ─── Config persist (XOR-encoded binary in Library/Caches) ───────────────────
+// NSUserDefaults больше не используется — ключи cui_* в Preferences plist
+// открытым текстом палили чит.
+
+static NSString* CfgPath(void) {
+    static NSString* p = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString* c = NSSearchPathForDirectoriesInDomains(NSCachesDirectory,
+                                                          NSUserDomainMask, YES).firstObject;
+        p = [c stringByAppendingPathComponent:@".k.db"];
+    });
+    return p;
+}
+static inline uint32_t CfgK(uint32_t i) { return (i * 2654435761u) ^ 0xA5C3E1D7u; }
+
 void CoreUI_SaveConfig(void) {
-    NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
-    [d setBool:g_aimbot.load()   forKey:@"cui_aimbot"];
-    [d setBool:g_silent.load()   forKey:@"cui_silent"];
-    [d setBool:g_aimVisible.load()forKey:@"cui_aimVisible"];
-    [d setBool:g_fovDraw.load()  forKey:@"cui_fovDraw"];
-    [d setBool:g_espBox.load()   forKey:@"cui_espBox"];
-    [d setBool:g_espSkel.load()  forKey:@"cui_espSkel"];
-    [d setBool:g_espName.load()  forKey:@"cui_espName"];
-    [d setBool:g_espHP.load()    forKey:@"cui_espHP"];
-    [d setBool:g_espWeapon.load()forKey:@"cui_espWeapon"];
-    [d setBool:g_espBomb.load()   forKey:@"cui_espBomb"];
-    [d setBool:g_espGrenade.load()forKey:@"cui_espGrenade"];
-    [d setBool:g_espDist.load()  forKey:@"cui_espDist"];
-    [d setBool:g_espTeam.load()  forKey:@"cui_espTeam"];
-    [d setBool:g_noRecoil.load() forKey:@"cui_noRecoil"];
-    [d setFloat:g_recoilPct.load() forKey:@"cui_recoilPct"];
-    [d setBool:g_hideRec.load()  forKey:@"cui_hideRec"];
-    [d setFloat:g_fov.load()     forKey:@"cui_fov"];
-    [d setFloat:g_smooth.load()  forKey:@"cui_smooth"];
-    [d setInteger:g_bone.load()  forKey:@"cui_bone"];
-    [d setInteger:g_lang.load()  forKey:@"cui_lang"];
-    [d setInteger:(NSInteger)g_menuColor.load() forKey:@"cui_menuColor"];
-    [d synchronize];
+    uint32_t b[22] = {0};
+    size_t n = 0;
+    b[n++] = 0x4D4B4346; // magic "MKCF"
+    b[n++] = (uint32_t)g_aimbot.load();
+    b[n++] = (uint32_t)g_silent.load();
+    b[n++] = (uint32_t)g_aimVisible.load();
+    b[n++] = (uint32_t)g_fovDraw.load();
+    b[n++] = (uint32_t)g_espBox.load();
+    b[n++] = (uint32_t)g_espSkel.load();
+    b[n++] = (uint32_t)g_espName.load();
+    b[n++] = (uint32_t)g_espHP.load();
+    b[n++] = (uint32_t)g_espWeapon.load();
+    b[n++] = (uint32_t)g_espBomb.load();
+    b[n++] = (uint32_t)g_espGrenade.load();
+    b[n++] = (uint32_t)g_espDist.load();
+    b[n++] = (uint32_t)g_espTeam.load();
+    b[n++] = (uint32_t)g_noRecoil.load();
+    b[n++] = (uint32_t)g_hideRec.load();
+    { float v = g_recoilPct.load(); uint32_t u; memcpy(&u,&v,4); b[n++] = u; }
+    { float v = g_fov.load();       uint32_t u; memcpy(&u,&v,4); b[n++] = u; }
+    { float v = g_smooth.load();    uint32_t u; memcpy(&u,&v,4); b[n++] = u; }
+    b[n++] = (uint32_t)g_bone.load();
+    b[n++] = (uint32_t)g_lang.load();
+    b[n++] = g_menuColor.load();
+    for (size_t i = 1; i < n; i++) b[i] ^= CfgK((uint32_t)i);
+    [[NSData dataWithBytes:b length:n * sizeof(uint32_t)]
+        writeToFile:CfgPath() atomically:YES];
 }
 
 void CoreUI_LoadConfig(void) {
-    NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
-    if (![d objectForKey:@"cui_hideRec"]) return; // first launch — keep defaults
-    g_aimbot.store([d boolForKey:@"cui_aimbot"]);
-    g_silent.store([d boolForKey:@"cui_silent"]);
-    if ([d objectForKey:@"cui_aimVisible"]) g_aimVisible.store([d boolForKey:@"cui_aimVisible"]);
-    g_fovDraw.store([d boolForKey:@"cui_fovDraw"]);
-    g_espBox.store([d boolForKey:@"cui_espBox"]);
-    g_espSkel.store([d boolForKey:@"cui_espSkel"]);
-    g_espName.store([d boolForKey:@"cui_espName"]);
-    g_espHP.store([d boolForKey:@"cui_espHP"]);
-    g_espWeapon.store([d boolForKey:@"cui_espWeapon"]);
-    g_espBomb.store([d boolForKey:@"cui_espBomb"]);
-    g_espGrenade.store([d boolForKey:@"cui_espGrenade"]);
-    g_espDist.store([d boolForKey:@"cui_espDist"]);
-    g_espTeam.store([d boolForKey:@"cui_espTeam"]);
-    g_noRecoil.store([d boolForKey:@"cui_noRecoil"]);
-    float rp = [d floatForKey:@"cui_recoilPct"];
-    if (rp >= 0.f && rp <= 100.f) g_recoilPct.store(rp);
-    else if (g_noRecoil.load()) g_recoilPct.store(100.f);
-    g_hideRec.store([d boolForKey:@"cui_hideRec"]);
-    float f = [d floatForKey:@"cui_fov"];
-    if (f > 0.5f && f < 40.f) g_fov.store(f);
-    float sm = [d floatForKey:@"cui_smooth"];
-    if (sm >= 1.f && sm <= 20.f) g_smooth.store(sm);
-    g_bone.store((int)[d integerForKey:@"cui_bone"]);
-    g_lang.store((int)[d integerForKey:@"cui_lang"]);
-    NSInteger col = [d integerForKey:@"cui_menuColor"];
-    if (col != 0) g_menuColor.store((uint32_t)col);
+    NSData* d = [NSData dataWithContentsOfFile:CfgPath()];
+    if (!d || d.length < 22 * sizeof(uint32_t)) return;
+    const uint32_t* p = (const uint32_t*)d.bytes;
+    uint32_t h[22] = {0};
+    size_t n = d.length / sizeof(uint32_t);
+    if (n > 22) n = 22;
+    for (size_t i = 0; i < n; i++) h[i] = p[i] ^ (i ? CfgK((uint32_t)i) : 0);
+    if (h[0] != 0x4D4B4346) return;
+
+    g_aimbot.store(h[1] != 0);
+    g_silent.store(h[2] != 0);
+    g_aimVisible.store(h[3] != 0);
+    g_fovDraw.store(h[4] != 0);
+    g_espBox.store(h[5] != 0);
+    g_espSkel.store(h[6] != 0);
+    g_espName.store(h[7] != 0);
+    g_espHP.store(h[8] != 0);
+    g_espWeapon.store(h[9] != 0);
+    g_espBomb.store(h[10] != 0);
+    g_espGrenade.store(h[11] != 0);
+    g_espDist.store(h[12] != 0);
+    g_espTeam.store(h[13] != 0);
+    g_noRecoil.store(h[14] != 0);
+    g_hideRec.store(h[15] != 0);
+    { float v; memcpy(&v, &h[16], 4); if (v >= 0.f && v <= 100.f) g_recoilPct.store(v);
+      else if (g_noRecoil.load()) g_recoilPct.store(100.f); }
+    { float v; memcpy(&v, &h[17], 4); if (v > 0.5f && v < 40.f) g_fov.store(v); }
+    { float v; memcpy(&v, &h[18], 4); if (v >= 1.f && v <= 20.f) g_smooth.store(v); }
+    g_bone.store((int)h[19]);
+    g_lang.store((int)h[20]);
+    if (h[21]) g_menuColor.store(h[21]);
 }
 
 // ─── Locale ──────────────────────────────────────────────────────────────────
@@ -112,9 +135,7 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     return [UIColor colorWithRed:r green:g blue:b alpha:a];
 }
 
-// ─── Window that never steals game touches ───────────────────────────────────
-
-// ── Drag ─────────────────────────────────────────────────────────────────────
+// ─── Drag ────────────────────────────────────────────────────────────────────
 @interface CoreUIDrag : NSObject
 + (void)attach:(UIView*)v;
 @end
@@ -135,7 +156,6 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     if (pan.state == UIGestureRecognizerStateBegan || pan.state == UIGestureRecognizerStateChanged) {
         CGPoint c = v.center;
         c.x += tr.x; c.y += tr.y;
-        // clamp inside superview
         CGRect sb = v.superview.bounds;
         CGFloat hw = v.bounds.size.width * 0.5;
         CGFloat hh = v.bounds.size.height * 0.5;
@@ -160,7 +180,7 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     for (UIView* v = h; v; v = v.superview) {
         if (v == fab || v == panel) return h;
     }
-    return nil; // never eat game taps
+    return nil;
 }
 - (BOOL)canBecomeFirstResponder { return NO; }
 @end
@@ -173,6 +193,7 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     return (h == self) ? nil : h;
 }
 @end
+
 @interface ACW : UIWindow @end
 @implementation ACW
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -185,7 +206,6 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
     return self;
 }
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
-    // ONLY fab or visible panel — everything else passes to the game (no phantom taps)
     extern UIView* g_panel_ref(void);
     extern UIView* g_fab_ref(void);
     UIView* panel = g_panel_ref();
@@ -249,8 +269,8 @@ static UIColor* C(CGFloat r,CGFloat g,CGFloat b,CGFloat a){
 @end
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
-static UIWindow*     g_hostWin = nil;  // control: FAB+menu only (interactive)
-static UIWindow*     g_drawWin = nil;  // draw: ESP+secure (NO interaction → no ghost taps)
+static UIWindow*     g_hostWin = nil;
+static UIWindow*     g_drawWin = nil;
 static UIView*       g_panel   = nil;
 static UIView*       g_fab     = nil;
 static UIView*       g_content = nil;
@@ -281,7 +301,6 @@ static CGRect FC_DrawFrame(UIWindow* key) {
         UIEdgeInsets s = key ? key.safeAreaInsets : UIEdgeInsetsZero;
         if (s.bottom > 1.f) bot = s.bottom + 6.f;
     }
-    // Leave home-indicator strip on the KEY/game window → gray inactive шторка
     b.size.height = MAX(1.f, b.size.height - bot);
     return b;
 }
@@ -290,11 +309,11 @@ static CGRect FC_FrameAboveHome(UIView* host) {
     CGRect b = host.bounds;
     if (b.size.width < 2) b = UIScreen.mainScreen.bounds;
     b.origin = CGPointZero;
-    return b; // full frame = correct ESP Y; taps filtered by ACW
+    return b;
 }
 
 
-// ─── Hide recording: ENTIRE UI (ESP + FAB + menu) from capture ───────────────
+// ─── Hide recording ──────────────────────────────────────────────────────────
 static UITextField* FC_SecureTF(void) {
     if (!g_secureField) {
         g_secureField = [[SecurePassField alloc] initWithFrame:CGRectMake(0,0,1,1)];
@@ -313,7 +332,6 @@ static UIView* FC_SecureContainer(UIView* root) {
     full.origin = CGPointZero;
     tf.frame = full;
     tf.secureTextEntry = YES;
-    // YES — hits reach FAB/panel via SecurePassField hitTest
     tf.userInteractionEnabled = YES;
 
     if (tf.superview != root)
@@ -358,10 +376,7 @@ static void applyHideRec(UIView* root) {
 
     if (on) {
         UIView* c = FC_SecureContainer(root);
-        if (!c) {
-            // retry next tick after layout
-            return;
-        }
+        if (!c) return;
         CGRect scr = UIScreen.mainScreen.bounds;
         scr.origin = CGPointZero;
         if (esp) {
@@ -525,7 +540,6 @@ static UIView* makeColorRow(NSString* title) {
         b.layer.borderColor = UIColor.whiteColor.CGColor;
         [b addAction:[UIAction actionWithHandler:^(__kindof UIAction* a) {
             g_menuColor.store(col);
-            // rebuild to refresh accents
             extern void CoreUI_RebuildMenu(void);
             CoreUI_RebuildMenu();
         }] forControlEvents:UIControlEventTouchUpInside];
@@ -635,7 +649,6 @@ static void rebuildContent() {
 }
 
 void CoreUI_RebuildMenu(void) {
-    // refresh tab titles + accent + content
     if (g_tabBtns) {
         NSArray* titles = g_lang.load()==1
             ? @[@"Аим", @"Сайлент", @"ESP", @"Разное", @"Cfg"]
@@ -665,7 +678,6 @@ static void buildPanel(UIView* host) {
     g_panel.layer.shadowOpacity = 0.45;
     g_panel.layer.shadowRadius = 20;
     g_panel.clipsToBounds = NO;
-    // gradient wash
     CAGradientLayer* grad = [CAGradientLayer layer];
     grad.frame = CGRectMake(0,0,340,420);
     grad.cornerRadius = 18;
@@ -677,7 +689,6 @@ static void buildPanel(UIView* host) {
     grad.startPoint = CGPointMake(0,0);
     grad.endPoint = CGPointMake(1,1);
     [g_panel.layer insertSublayer:grad atIndex:0];
-    // soft shimmer animation
     CABasicAnimation* sh = [CABasicAnimation animationWithKeyPath:@"locations"];
     sh.fromValue = @[@0.0, @0.35, @0.7];
     sh.toValue = @[@0.3, @0.65, @1.0];
@@ -686,22 +697,20 @@ static void buildPanel(UIView* host) {
     sh.repeatCount = HUGE_VALF;
     grad.locations = @[@0.0, @0.45, @1.0];
     [grad addAnimation:sh forKey:@"shim"];
-    g_panel.hidden = YES; // always start hidden — open via FAB only
+    g_panel.hidden = YES;
     g_panel.alpha = 0;
 
-    // Logo
     UILabel* logo = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 200, 28)];
     logo.text = @"mark";
     logo.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBlack];
     logo.textColor = Accent();
     [g_panel addSubview:logo];
     UILabel* sub = [[UILabel alloc] initWithFrame:CGRectMake(16, 36, 280, 16)];
-    sub.text = @"antilose64  ·  darling";
+    sub.text = @"v2.5  ·  beta";
     sub.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     sub.textColor = [UIColor colorWithWhite:0.7 alpha:1];
     [g_panel addSubview:sub];
 
-    // Tabs
     NSArray* titles = @[@"Aim", @"Silent", @"ESP", @"Misc", @"Cfg"];
     NSMutableArray* btns = [NSMutableArray array];
     CGFloat tx = 8, ty = 58;
@@ -726,7 +735,6 @@ static void buildPanel(UIView* host) {
     }
     g_tabBtns = btns;
 
-    // Scroll content
     g_scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(10, 100, 320, ph-110)];
     g_scroll.showsVerticalScrollIndicator = YES;
     g_scroll.alwaysBounceVertical = YES;
@@ -794,7 +802,6 @@ static void buildFab(UIView* host) {
     [g_fab addSubview:btn];
     [host addSubview:g_fab];
 
-    // Optional: drop fab_icon.jpeg into app Documents to custom-icon the FAB
     @try {
         NSString* doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
         NSString* ip = [doc stringByAppendingPathComponent:@"fab_icon.jpeg"];
@@ -855,14 +862,13 @@ static void buildFab(UIView* host) {
     if (!g_hostWin || ![g_hostWin isKindOfClass:[ACW class]]) {
         CGRect f = key.bounds;
         if (f.size.width < 2) f = UIScreen.mainScreen.bounds;
-        // Leave home-indicator strip on game window → gray шторка
         CGFloat bot = 34.f;
         if (@available(iOS 11.0, *)) {
             if (key.safeAreaInsets.bottom > 1.f) bot = key.safeAreaInsets.bottom;
         }
         f.size.height = MAX(1.f, f.size.height - bot);
         ACW* ov = [[ACW alloc] initWithFrame:f];
-        ov.windowLevel = UIWindowLevelNormal + 1; // low = less шторка activation
+        ov.windowLevel = UIWindowLevelNormal + 1;
         ov.backgroundColor = UIColor.clearColor;
         if (@available(iOS 13.0, *)) {
             ov.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -871,7 +877,7 @@ static void buildFab(UIView* host) {
         ACVC* vc = [ACVC new];
         ov.rootViewController = vc;
         vc.view.backgroundColor = UIColor.clearColor;
-        ov.userInteractionEnabled = YES; // needed for FAB; pointInside filters rest
+        ov.userInteractionEnabled = YES;
         ov.hidden = NO;
         g_hostWin = ov;
     } else {
@@ -904,7 +910,6 @@ static void buildFab(UIView* host) {
     }
     applyHideRec(root);
     CoreUI_EnsureFOVOverlay(g_hostWin);
-    // When hide-rec ON, FAB/panel live inside secure — don't pull to root
     if (!g_hideRec.load()) {
         if (g_panel) [root bringSubviewToFront:g_panel];
         if (g_fab) [root bringSubviewToFront:g_fab];
@@ -942,7 +947,7 @@ static void buildFab(UIView* host) {
     if (g_hostWin) {
         UIView* root = g_hostWin.rootViewController.view;
         if (g_hideRec.load()) {
-            applyHideRec(root); // keeps FAB+panel+ESP inside secure container
+            applyHideRec(root);
         } else {
             CoreUI_EnsureFOVOverlay(g_hostWin);
             extern UIView* g_esp_view(void);
@@ -981,12 +986,23 @@ static void wipe_docs(void) {
 
 __attribute__((constructor))
 static void coreui_ctor() {
+    // одноразовая чистка старых ключей cui_* в Preferences plist
+    NSUserDefaults* ud = [NSUserDefaults standardUserDefaults];
+    for (NSString* k in @[@"cui_aimbot",@"cui_silent",@"cui_aimVisible",@"cui_fovDraw",
+        @"cui_espBox",@"cui_espSkel",@"cui_espName",@"cui_espHP",@"cui_espWeapon",
+        @"cui_espBomb",@"cui_espGrenade",@"cui_espDist",@"cui_espTeam",@"cui_noRecoil",
+        @"cui_recoilPct",@"cui_hideRec",@"cui_fov",@"cui_smooth",@"cui_bone",@"cui_lang",
+        @"cui_menuColor"]) {
+        [ud removeObjectForKey:k];
+    }
+    [ud synchronize];
+
+    // один проход чистим stale копии от старых сборок
     wipe_docs();
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        wipe_docs();
         [ACH start];
     });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ wipe_docs(); });
+    // отложенные wipe_docs на 1.2s и 4.0s УБРАНЫ
 }
